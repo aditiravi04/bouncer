@@ -7,11 +7,11 @@ import {
 } from '../shared/utils';
 import { PREDEFINED_MODELS, API_DISPLAY_NAMES, DEFAULT_MODEL } from '../shared/models';
 import { buildAPIMessages } from '../shared/prompts';
-import { callDirectAPI, callAnthropicAPI, callImbueAPI, callImbueAiTextDetection } from './providers';
+import { callDirectAPI, callAnthropicAPI, callImbueAPI, callImbueAiTextDetection, callImbueAiImageDetection } from './providers';
 import { runDetectors, type Detector, type DetectorResult } from './detectors';
 import { callLocalInference, localEngine } from './local-model';
-import { getStorage, setStorage, removeStorage, getDescriptions, clampThreshold, DEFAULT_AI_TEXT_DETECTION_THRESHOLD } from '../shared/storage';
-export { DEFAULT_AI_TEXT_DETECTION_THRESHOLD };
+import { getStorage, setStorage, removeStorage, getDescriptions, clampThreshold, clampImageThreshold, DEFAULT_AI_TEXT_DETECTION_THRESHOLD, DEFAULT_AI_IMAGE_DETECTION_THRESHOLD } from '../shared/storage';
+export { DEFAULT_AI_TEXT_DETECTION_THRESHOLD, DEFAULT_AI_IMAGE_DETECTION_THRESHOLD };
 import type {
   EvaluationResult, PipelineResponse, PipelineError, PendingEvaluation,
   ErrorState, Settings, APIConfig, ChatMessage, BackgroundToContentMessage, LocalModelDef,
@@ -81,11 +81,24 @@ function computeAiSkipReason(
   return null;
 }
 
-// The full per-post plan. Always two entries so the popup is consistent. A
+// Why AI image detection won't run for a given post (or null if it will).
+// Mirrors computeAiSkipReason: backend gate → toggle → per-post content gate.
+function computeAiImageSkipReason(
+  aiImageToggleOn: boolean,
+  imageUrls: string[],
+): string | null {
+  if (process.env.HAS_IMBUE_BACKEND !== 'true') return 'AI detection requires Imbue backend';
+  if (!aiImageToggleOn) return 'AI image detection disabled';
+  if (imageUrls.length === 0) return 'No images on this post';
+  return null;
+}
+
+// The full per-post plan. Always three entries so the popup is consistent. A
 // detector that can't run gets a skipReason instead of a willRun=true flag.
 function buildTabPlan(
   filterEnabled: boolean,
   aiSkipReason: string | null,
+  aiImageSkipReason: string | null,
 ): TabPlanEntry[] {
   return [
     {
@@ -97,6 +110,11 @@ function buildTabPlan(
       name: 'aiText',
       willRun: !aiSkipReason,
       skipReason: aiSkipReason ?? undefined,
+    },
+    {
+      name: 'aiImage',
+      willRun: !aiImageSkipReason,
+      skipReason: aiImageSkipReason ?? undefined,
     },
   ];
 }
@@ -181,10 +199,12 @@ async function runDetectorsAndCaptureSnapshots(
 function buildLiveDetectors(args: {
   filterEnabled: boolean;
   aiEnabled: boolean;
+  aiImageEnabled: boolean;
   runFilter: () => Promise<DetectorResult>;
   rawText: string;
   imageUrls: string[];
   aiThreshold: number;
+  aiImageThreshold: number;
 }): Detector[] {
   const detectors: Detector[] = [];
   if (args.filterEnabled) {
@@ -206,6 +226,24 @@ function buildLiveDetectors(args: {
             ? `AI-generated text detected (confidence ${pct})`
             : `Text not detected as AI-generated (confidence ${pct})`,
           category: isAi ? 'AI-generated' : null,
+          rawResponse: null,
+        };
+      })(),
+    });
+  }
+  if (args.aiImageEnabled) {
+    detectors.push({
+      name: 'aiImage',
+      promise: (async (): Promise<DetectorResult> => {
+        const aiResp = await callImbueAiImageDetection(args.imageUrls);
+        const isAi = aiResp.confidence >= args.aiImageThreshold;
+        const pct = `${(aiResp.confidence * 100).toFixed(0)}%`;
+        return {
+          shouldHide: isAi,
+          reasoning: isAi
+            ? `AI-generated image detected (confidence ${pct})`
+            : `Images not detected as AI-generated (confidence ${pct})`,
+          category: isAi ? 'AI-generated image' : null,
           rawResponse: null,
         };
       })(),
@@ -375,12 +413,15 @@ export function replayDetectorStates(tabId: number, evaluationId: string, evalRe
     return;
   }
 
-  // Legacy entry without per-detector state. Show two tabs and attribute the
+  // Legacy entry without per-detector state. Show three tabs and attribute the
   // cached reasoning to whichever detector likely produced it (by category).
-  const isAi = evalResult.category === 'AI-generated';
-  const winnerName = isAi ? 'aiText' : 'filter';
-  const otherName = isAi ? 'filter' : 'aiText';
-  void sendToTab(tabId, { type: 'evaluationStarted', evaluationId, detectorNames: ['filter', 'aiText'] });
+  // Legacy cache entries predate aiImage so the winner can only be aiText or filter.
+  const isAi = evalResult.category === 'AI-generated' || evalResult.category === 'AI-generated image';
+  const winnerName = evalResult.category === 'AI-generated image'
+    ? 'aiImage'
+    : (isAi ? 'aiText' : 'filter');
+  const detectorNames = ['filter', 'aiText', 'aiImage'];
+  void sendToTab(tabId, { type: 'evaluationStarted', evaluationId, detectorNames });
   void sendToTab(tabId, {
     type: 'detectorResponse',
     evaluationId,
@@ -389,13 +430,16 @@ export function replayDetectorStates(tabId: number, evaluationId: string, evalRe
     reasoning: evalResult.reasoning,
     category: evalResult.category ?? null,
   });
-  void sendToTab(tabId, {
-    type: 'detectorResponse',
-    evaluationId,
-    detectorName: otherName,
-    skipped: true,
-    skipReason: 'No detail available (cached before tabs were added)',
-  });
+  for (const otherName of detectorNames) {
+    if (otherName === winnerName) continue;
+    void sendToTab(tabId, {
+      type: 'detectorResponse',
+      evaluationId,
+      detectorName: otherName,
+      skipped: true,
+      skipReason: 'No detail available (cached before tabs were added)',
+    });
+  }
 }
 
 // Generic helper to broadcast messages to all tabs with active content scripts
@@ -417,6 +461,7 @@ export async function getSettings(siteId?: SiteId): Promise<Settings> {
     'apiKey', 'openaiApiKey', 'openaiApiBase', 'openrouterApiKey', 'geminiApiKey',
     'anthropicApiKey', 'enabled', 'useEmbeddings', 'selectedModel',
     'customModels', 'predefinedModelKwargs', 'aiTextFilterEnabled', 'aiTextDetectionThreshold',
+    'aiImageFilterEnabled', 'aiImageDetectionThreshold',
     'filterReplies'
   ] as const;
   const [data, descriptions] = await Promise.all([
@@ -438,6 +483,8 @@ export async function getSettings(siteId?: SiteId): Promise<Settings> {
     predefinedModelKwargs: data.predefinedModelKwargs || {},
     aiTextFilterEnabled: data.aiTextFilterEnabled === true,
     aiTextDetectionThreshold: clampThreshold(data.aiTextDetectionThreshold),
+    aiImageFilterEnabled: data.aiImageFilterEnabled === true,
+    aiImageDetectionThreshold: clampImageThreshold(data.aiImageDetectionThreshold),
     filterReplies: data.filterReplies !== false
   };
 }
@@ -764,6 +811,7 @@ async function processBatch(): Promise<void> {
   // always shows two tabs (both marked skipped).
   const filterEnabled = !!(settings.descriptions && settings.descriptions.length > 0);
   const aiToggleOn = settings.aiTextFilterEnabled;
+  const aiImageToggleOn = settings.aiImageFilterEnabled;
 
   // Check cache
   const imageUrls = item.imageUrls || [];
@@ -865,16 +913,21 @@ async function processBatch(): Promise<void> {
     const aiSkipReason = computeAiSkipReason(aiToggleOn, item.rawText);
     const aiEnabled = !aiSkipReason;
 
-    const tabPlan = buildTabPlan(filterEnabled, aiSkipReason);
+    const aiImageSkipReason = computeAiImageSkipReason(aiImageToggleOn, imageUrls);
+    const aiImageEnabled = !aiImageSkipReason;
+
+    const tabPlan = buildTabPlan(filterEnabled, aiSkipReason, aiImageSkipReason);
     const snapshots = dispatchInitialTabs(batchTabId, item.evaluationId, tabPlan);
 
     const detectors = buildLiveDetectors({
       filterEnabled,
       aiEnabled,
+      aiImageEnabled,
       runFilter,
       rawText: item.rawText,
       imageUrls,
       aiThreshold: settings.aiTextDetectionThreshold,
+      aiImageThreshold: settings.aiImageDetectionThreshold,
     });
 
     if (detectors.length === 0) {
