@@ -25,7 +25,7 @@ export function initUI(deps: ContentUIDeps) {
   // injection guards think no box exists — resulting in duplicate UI.
   // Proactively remove any leftover boxes from a prior injection.
   const stale = document.querySelectorAll(
-    '.filter-phrases-sidebar, .filter-phrases-bottom, .filter-phrases-mobile'
+    '.filter-phrases-sidebar, .filter-phrases-bottom, .filter-phrases-mobile, .filter-phrases-banner'
   );
   console.log('[Bouncer] initUI: clearing', stale.length, 'stale filter box(es) from prior injection');
   stale.forEach((el) => el.remove());
@@ -145,7 +145,7 @@ async function launchSignIn() {
 // (Safari re-injects when the user changes per-site permissions).
 function refreshAllFilterBoxes() {
   const existing = document.querySelectorAll(
-    '.filter-phrases-sidebar, .filter-phrases-bottom, .filter-phrases-mobile'
+    '.filter-phrases-sidebar, .filter-phrases-bottom, .filter-phrases-mobile, .filter-phrases-banner'
   );
   console.log('[Bouncer] refreshAllFilterBoxes: removing', existing.length, 'existing box(es)');
   existing.forEach((el) => el.remove());
@@ -153,9 +153,13 @@ function refreshAllFilterBoxes() {
   bottomFilterContainer = null;
   mobileFilterContainer = null;
 
-  injectFilterPhrasesInput();
-  injectBottomFilterBox();
-  injectMobileFilterBox();
+  if (_deps.adapter.filterBoxPlacement === 'banner') {
+    injectBannerFilterBox();
+  } else {
+    injectFilterPhrasesInput();
+    injectBottomFilterBox();
+    injectMobileFilterBox();
+  }
 
   // Trigger post processing now that we're authenticated
   if (isAuthenticated && _deps.processExistingPosts) {
@@ -530,6 +534,11 @@ export function injectFilterPhrasesInput() {
   filterPhrasesContainer.className = usingWrapper
     ? 'filter-phrases-sidebar filter-phrases-sidebar--in-wrapper'
     : 'filter-phrases-sidebar';
+  // linkedin adaptation: raise z-index so LinkedIn promoted/ad cards in the
+  // right rail don't overlap the filter box.
+  if (_deps.adapter.siteId === 'linkedin') {
+    filterPhrasesContainer.classList.add('filter-phrases-sidebar--linkedin');
+  }
 
   if (process.env.HAS_IMBUE_BACKEND === 'true' && !isAuthenticated) {
     filterPhrasesContainer.replaceChildren(parseHTML(getSignInHTML()));
@@ -875,6 +884,100 @@ export function injectMobileFilterBox() {
 
   // Update visibility based on current page
   updateMobileFilterVisibility();
+}
+
+// ==================== Banner Filter ====================
+// Used by platforms whose `filterBoxPlacement === 'banner'` (e.g. YouTube).
+// Reuses the same `filterPhrasesContainer` slot as the Twitter sidebar variant
+// so updateTheme(), syncFilterPhrases(), and refreshAllFilterBoxes() continue
+// to find and update the active filter UI without special-casing each
+// placement. The inserted node carries `.filter-phrases-banner` instead of
+// `.filter-phrases-sidebar` so platform-specific CSS can style it differently.
+
+function updateBannerFilterVisibility() {
+  if (!filterPhrasesContainer || !filterPhrasesContainer.isConnected) return;
+  if (!_deps.adapter.shouldProcessCurrentPage()) {
+    filterPhrasesContainer.remove();
+    filterPhrasesContainer = null;
+    return;
+  }
+  // SPA navigation between two processable pages (e.g. YT home ↔ watch)
+  // doesn't change `shouldProcessCurrentPage`, but `getFilterBoxAnchor`
+  // can return a different parent per page (drawer on home, `#secondary`
+  // on watch). When the box's current parent no longer matches the
+  // adapter's chosen anchor, tear it down so `handleDOMMutation` can
+  // re-inject at the right location.
+  const expected = _deps.adapter.getFilterBoxAnchor?.();
+  if (!expected) return;
+  if (filterPhrasesContainer.parentElement !== expected.parent) {
+    filterPhrasesContainer.remove();
+    filterPhrasesContainer = null;
+    return;
+  }
+  // Adapter pointed at the same parent, but YT may have inserted its own
+  // widgets (e.g. the watch-page autoplay/next panel) above our box after
+  // injection. Re-anchor so we stay at the top — needed for the sticky
+  // positioning on the watch sidebar to land above YT's own header row.
+  if (expected.insertBefore && filterPhrasesContainer !== expected.insertBefore
+      && filterPhrasesContainer.previousElementSibling) {
+    expected.parent.insertBefore(filterPhrasesContainer, expected.insertBefore);
+  }
+}
+
+export function injectBannerFilterBox() {
+  const adapter = _deps.adapter;
+  if (!adapter.getFilterBoxAnchor) {
+    console.warn('[Bouncer] injectBannerFilterBox: adapter has no getFilterBoxAnchor');
+    return;
+  }
+
+  // Adopt any existing banner from a prior content-script injection
+  if (!filterPhrasesContainer || !filterPhrasesContainer.isConnected) {
+    filterPhrasesContainer = document.querySelector<HTMLElement>('.filter-phrases-banner');
+  }
+  if (filterPhrasesContainer && filterPhrasesContainer.isConnected) {
+    updateBannerFilterVisibility();
+    return;
+  }
+
+  if (!adapter.shouldProcessCurrentPage()) return;
+
+  const anchor = adapter.getFilterBoxAnchor();
+  if (!anchor) return; // page chrome not ready yet — DOM observer will retry
+
+  filterPhrasesContainer = document.createElement('div');
+  filterPhrasesContainer.className = `filter-phrases-banner filter-phrases-banner--${adapter.siteId}`;
+
+  if (process.env.HAS_IMBUE_BACKEND === 'true' && !isAuthenticated) {
+    filterPhrasesContainer.replaceChildren(parseHTML(getSignInHTML()));
+    anchor.parent.insertBefore(filterPhrasesContainer, anchor.insertBefore);
+    updateTheme();
+    setupSignInButton(filterPhrasesContainer);
+    updateBannerFilterVisibility();
+    return;
+  }
+
+  const showSignOut = IS_DEV_BUILD && !_deps.IS_IOS;
+  filterPhrasesContainer.replaceChildren(parseHTML(buildFilterContainerHTML(showSignOut)));
+  anchor.parent.insertBefore(filterPhrasesContainer, anchor.insertBefore);
+
+  updateTheme();
+  updateFilteredTabCount();
+
+  setupFilterBoxEventHandlers(filterPhrasesContainer);
+  maybeRenderUpdateBanner(filterPhrasesContainer).catch(err =>
+    console.error('[UI] maybeRenderUpdateBanner failed (banner):', err));
+
+  const signOutBtn = filterPhrasesContainer.querySelector('.filter-signout-btn');
+  if (signOutBtn) {
+    signOutBtn.addEventListener('click', asyncHandler(async () => {
+      await chrome.runtime.sendMessage({ type: 'signOut' });
+      isAuthenticated = false;
+      refreshAllFilterBoxes();
+    }));
+  }
+
+  updateBannerFilterVisibility();
 }
 
 // ==================== Filter Phrases ====================
@@ -1291,7 +1394,7 @@ function buildImportButton(phrases: string[]): HTMLElement {
 // gating relies on.
 function pickVisibleBouncerLayout(): HTMLElement | null {
   const layouts = document.querySelectorAll<HTMLElement>(
-    '.filter-phrases-sidebar, .filter-phrases-bottom, .filter-phrases-mobile',
+    '.filter-phrases-sidebar, .filter-phrases-bottom, .filter-phrases-mobile, .filter-phrases-banner',
   );
   for (const layout of layouts) {
     if (layout.offsetParent !== null) return layout;
@@ -1685,6 +1788,19 @@ export function updateFilteredTabCount() {
   const shouldAnimate = newCount > previousFilteredCount;
   previousFilteredCount = newCount;
 
+  // Publish the count in two places so platform adapters can stay in sync:
+  //   1. A data attribute on `document.documentElement` — the persistent
+  //      mirror. Newly-injected consumers (e.g. YT's mini-guide badge
+  //      that gets created late) can read the current value directly.
+  //   2. A CustomEvent — the change notifier. Consumers already in place
+  //      re-render in response.
+  // `filteredPosts.length` remains the single source of truth; these are
+  // just publish surfaces.
+  document.documentElement.dataset.bouncerFilteredCount = String(newCount);
+  document.dispatchEvent(new CustomEvent('bouncer:filtered-count-changed', {
+    detail: { count: newCount, animate: shouldAnimate },
+  }));
+
   const containers = [filterPhrasesContainer, bottomFilterContainer, mobileFilterContainer];
   containers.forEach(container => {
     if (container && container.isConnected) {
@@ -1825,6 +1941,11 @@ export function toggleFilteredTab(active: boolean) {
 
       filteredViewContainer = document.createElement('div');
       filteredViewContainer.className = 'filtered-view-container';
+      // linkedin adaptation: tag the panel so its posts adopt LinkedIn's
+      // card visual style (white card, off-white feed background, etc.).
+      if (_deps.adapter.siteId === 'linkedin') {
+        filteredViewContainer.classList.add('filtered-view-container--linkedin');
+      }
 
       const header = document.createElement('div');
       header.className = 'filtered-modal-header';
@@ -1832,7 +1953,7 @@ export function toggleFilteredTab(active: boolean) {
         <button class="filtered-modal-close" aria-label="Close">
           <svg viewBox="0 0 24 24"><path d="M10.59 12L4.54 5.96l1.42-1.42L12 10.59l6.04-6.05 1.42 1.42L13.41 12l6.05 6.04-1.42 1.42L12 13.41l-6.04 6.05-1.42-1.42L10.59 12z"></path></svg>
         </button>
-        <span class="filtered-modal-title">Filtered posts</span>
+        <span class="filtered-modal-title">${_deps.adapter.siteId === 'youtube' ? 'Filtered videos' : 'Filtered posts'}</span>
       `));
 
       const content = document.createElement('div');
@@ -1877,13 +1998,202 @@ export function toggleFilteredTab(active: boolean) {
   }
 }
 
+// Builds the "Restore" button shared by every filtered-post layout. Clicking
+// it reports a false positive, removes the post from the panel, unhides the
+// original article in the feed, and overrides the cache so re-evaluation keeps
+// the post visible.
+function createRestoreButton(post: FilteredPost, postContent: PostContent): HTMLButtonElement {
+  const restoreBtn = document.createElement('button');
+  restoreBtn.className = 'slop-restore';
+  restoreBtn.textContent = 'Restore';
+  restoreBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    chrome.runtime.sendMessage({
+      type: 'sendFeedback',
+      siteId: _deps.adapter.siteId,
+      postUrl: postContent.postUrl || null,
+      tweetData: { text: post.evaluationText, imageUrls: postContent.imageUrls || [] },
+      rawResponse: post.rawResponse || '',
+      reasoning: post.reasoning || '',
+      decision: 'false_positive'
+    }).catch(err => console.error('[Bouncer] Undo feedback error:', err));
+
+    // Remove from filtered posts list
+    const key = postContent.postUrl || post.evaluationText.substring(0, 200);
+    const idx = filteredPosts.findIndex(p => (p.post.postUrl || p.evaluationText.substring(0, 200)) === key);
+    if (idx !== -1) filteredPosts.splice(idx, 1);
+    filteredPostKeys.delete(key);
+
+    // Try to unhide original article in the feed
+    for (const article of _deps.findPosts()) {
+      const postUrl = _deps.adapter.getPostUrl(article);
+      if (postUrl && postContent.postUrl && postUrl.includes(postContent.postUrl)) {
+        const container = _deps.adapter.getPostContainer(article);
+        container.style.display = '';
+        container.style.visibility = '';
+        delete container.dataset.filteredByExtension;
+        article.style.opacity = '';
+        article.style.transition = '';
+        _deps.processedPosts.delete(article);
+        markPostVerified(article);
+        break;
+      }
+    }
+
+    // Override cache so re-evaluation keeps post visible
+    chrome.runtime.sendMessage({
+      type: 'overrideCacheEntry',
+      post: post.evaluationText,
+      imageUrls: postContent.imageUrls || [],
+      postUrl: postContent.postUrl || null,
+      siteId: _deps.adapter.siteId,
+      shouldHide: false,
+      reasoning: 'User reported: false positive'
+    }).catch(err => console.error('[Bouncer] Override cache error:', err));
+
+    updateFilteredTabCount();
+    const outerContainer = restoreBtn.closest('.filtered-view-container') || restoreBtn.closest('.ff-ios-filtered-modal-backdrop');
+    const innerContainer = outerContainer?.querySelector('.filtered-modal-content') || outerContainer?.querySelector('.ff-ios-filtered-modal-content');
+    if (innerContainer) renderFilteredPostsView(innerContainer);
+  });
+  return restoreBtn;
+}
+
+// Wraps a built card in an <a> (so middle-click / ctrl-click open natively)
+// while keeping clicks on buttons/actions from navigating.
+function wrapInPostLink(card: HTMLElement, postUrl: string | null | undefined): HTMLElement {
+  if (!postUrl) return card;
+  const link = document.createElement('a');
+  link.href = postUrl;
+  link.className = 'slop-post-link';
+  link.addEventListener('click', (e) => {
+    if ((e.target as Element).closest('button, [role="button"], .slop-restore, .slop-post-actions')) {
+      e.preventDefault();
+    }
+  });
+  link.appendChild(card);
+  return link;
+}
+
+// YouTube-specific filtered-post card: thumbnail on top, then a channel-avatar
+// row with the video title, channel name and view/age metadata — mirroring
+// YouTube's own grid video lockups rather than the Twitter tweet layout.
+function buildYouTubeCard(post: FilteredPost): HTMLElement {
+  const { post: postContent } = post;
+  const isShort = !!postContent.postUrl?.includes('/shorts/');
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'slop-post-wrapper yt-card';
+
+  const card = document.createElement('div');
+  card.className = 'yt-card-inner';
+
+  // Category tag sits in its own right-aligned row above the thumbnail.
+  if (post.category) {
+    const tagRow = document.createElement('div');
+    tagRow.className = 'yt-card-tag-row';
+    const tag = document.createElement('span');
+    tag.className = 'slop-category-tag yt-card-tag';
+    tag.textContent = post.category.toUpperCase();
+    tagRow.appendChild(tag);
+    card.appendChild(tagRow);
+  }
+
+  // Thumbnail (prefer the adapter's higher-quality display URL)
+  const displayUrls = postContent.displayImageUrls?.length
+    ? postContent.displayImageUrls
+    : postContent.imageUrls;
+  const thumb = document.createElement('div');
+  thumb.className = 'yt-card-thumb';
+  if (isShort) thumb.classList.add('yt-card-thumb-short');
+  if (displayUrls && displayUrls.length > 0 && !postContent.mediaBlurred) {
+    const img = document.createElement('img');
+    img.src = displayUrls[0];
+    img.loading = 'lazy';
+    thumb.appendChild(img);
+  } else {
+    thumb.classList.add('yt-card-thumb-empty');
+  }
+  card.appendChild(thumb);
+
+  // Info row: channel avatar + text column
+  const info = document.createElement('div');
+  info.className = 'yt-card-info';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'yt-card-avatar';
+  if (postContent.avatarUrl) {
+    const img = document.createElement('img');
+    img.src = postContent.avatarUrl;
+    avatar.appendChild(img);
+  } else if (isShort) {
+    avatar.classList.add('slop-avatar-shorts');
+    avatar.replaceChildren(parseHTML(
+      '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M17.77 10.32l-1.2-.5L18 9.06a3.74 3.74 0 0 0-3.5-6.62L6.18 6.83a3.74 3.74 0 0 0 .04 6.62l1.2.5L6 14.94a3.74 3.74 0 0 0 3.5 6.62l8.32-4.39a3.74 3.74 0 0 0-.04-6.85zM10 15.5v-7l6 3.5-6 3.5z" fill="currentColor"/>' +
+      '</svg>'
+    ));
+  } else {
+    const initial = (postContent.author?.[0] || '?').toUpperCase();
+    const fallback = document.createElement('span');
+    fallback.className = 'slop-avatar-initial';
+    fallback.textContent = initial;
+    avatar.appendChild(fallback);
+  }
+  info.appendChild(avatar);
+
+  const textCol = document.createElement('div');
+  textCol.className = 'yt-card-text';
+
+  const title = document.createElement('div');
+  title.className = 'yt-card-title';
+  if (postContent.textHtml) {
+    title.replaceChildren(DOMPurify.sanitize(postContent.textHtml, { RETURN_DOM_FRAGMENT: true }));
+  } else {
+    title.textContent = postContent.text || post.evaluationText;
+  }
+  textCol.appendChild(title);
+
+  if (postContent.author) {
+    const channel = document.createElement('div');
+    channel.className = 'yt-card-channel';
+    channel.textContent = postContent.author;
+    textCol.appendChild(channel);
+  }
+  if (postContent.timeText) {
+    const meta = document.createElement('div');
+    meta.className = 'yt-card-meta';
+    meta.textContent = postContent.timeText;
+    textCol.appendChild(meta);
+  }
+  info.appendChild(textCol);
+  card.appendChild(info);
+
+  // Reasoning
+  const reasoning = document.createElement('div');
+  reasoning.className = 'slop-post-reasoning yt-card-reasoning';
+  reasoning.textContent = cleanReasoning(post.reasoning) || 'Filtered';
+  card.appendChild(reasoning);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'slop-post-actions';
+  actions.appendChild(createRestoreButton(post, postContent));
+  card.appendChild(actions);
+
+  wrapper.appendChild(wrapInPostLink(card, postContent.postUrl));
+  return wrapper;
+}
+
 export function renderFilteredPostsView(container: Element) {
+  const noun = _deps.adapter.siteId === 'youtube' ? 'videos' : 'posts';
   if (filteredPosts.length === 0) {
     container.replaceChildren(parseHTML(`
       <div class="filtered-posts-container">
         <div class="filtered-posts-empty">
-          No posts have been filtered out in this session.<br>
-          Removed posts will appear here.
+          No ${noun} have been filtered out in this session.<br>
+          Removed ${noun} will appear here.
         </div>
       </div>
     `));
@@ -1894,43 +2204,162 @@ export function renderFilteredPostsView(container: Element) {
   container.replaceChildren(parseHTML('<div class="slop-posts-container"></div>'));
   const postsContainer = container.querySelector('.slop-posts-container')!;
 
-  // Render posts in reverse order (newest first)
+  const isYouTube = _deps.adapter.siteId === 'youtube';
+
+  // Render posts in reverse order (newest first); YouTube uses video lockups,
+  // every other platform uses the tweet-style card.
   [...filteredPosts].reverse().forEach((post) => {
-    const { post: postContent } = post;
-    const wrapper = document.createElement('div');
-    wrapper.className = 'slop-post-wrapper';
+    postsContainer.appendChild(isYouTube ? buildYouTubeCard(post) : buildTwitterCard(post));
+  });
+}
 
-    // Main post row: avatar + body
-    const postRow = document.createElement('div');
-    postRow.className = 'slop-post';
+// linkedin adaptation: static SVG icons used inside LinkedIn filtered-post
+// cards. Defined here so buildTwitterCard's LinkedIn branch can pull them in
+// without leaking the implementation into a public/exported surface.
+function _liLinkedInBadge(): SVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '16'); svg.setAttribute('height', '16');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('aria-label', 'LinkedIn'); svg.setAttribute('role', 'img');
+  svg.classList.add('slop-li-badge-icon');
+  const bg = document.createElementNS(ns, 'rect');
+  bg.setAttribute('width', '16'); bg.setAttribute('height', '16');
+  bg.setAttribute('rx', '3'); bg.setAttribute('fill', '#0A66C2');
+  svg.appendChild(bg);
+  const iStem = document.createElementNS(ns, 'rect');
+  iStem.setAttribute('x', '2.5'); iStem.setAttribute('y', '6');
+  iStem.setAttribute('width', '2'); iStem.setAttribute('height', '7');
+  iStem.setAttribute('fill', 'white');
+  svg.appendChild(iStem);
+  const iDot = document.createElementNS(ns, 'circle');
+  iDot.setAttribute('cx', '3.5'); iDot.setAttribute('cy', '4'); iDot.setAttribute('r', '1.2');
+  iDot.setAttribute('fill', 'white');
+  svg.appendChild(iDot);
+  const n = document.createElementNS(ns, 'path');
+  n.setAttribute('fill', 'white');
+  n.setAttribute('d', 'M6.5 6h2v1.1C8.8 6.4 9.5 6 10.5 6 12.2 6 12.5 7.2 12.5 8.8V13h-2V9.3c0-.8-.2-1.4-1-1.4-.9 0-1 .6-1 1.5V13H6.5V6z');
+  svg.appendChild(n);
+  return svg;
+}
+function _liGlobeIcon(): SVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '14'); svg.setAttribute('height', '14');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('slop-li-globe-icon');
+  const p = document.createElementNS(ns, 'path');
+  p.setAttribute('fill', 'currentColor');
+  p.setAttribute('d', 'M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zM3.1 8.5h2.1c.1.9.3 1.8.6 2.5A5.5 5.5 0 0 1 3.1 8.5zm0-1A5.5 5.5 0 0 1 5.8 5c-.3.7-.5 1.6-.6 2.5H3.1zM8 13c-.5 0-1.4-1.6-1.6-3.5h3.2C9.4 11.4 8.5 13 8 13zm-1.6-4.5c.1-1.1.4-2 .8-2.7.2-.3.5-.5.8-.5s.6.2.8.5c.4.7.7 1.6.8 2.7H6.4zm4.5 0c-.1-.9-.3-1.8-.6-2.5A5.5 5.5 0 0 1 12.9 8.5h-2zm2 1a5.5 5.5 0 0 1-2.8 2.5c.3-.7.5-1.6.6-2.5h2.2z');
+  svg.appendChild(p);
+  return svg;
+}
 
-    // Avatar — show image if available, otherwise show initial as fallback
-    const avatar = document.createElement('div');
-    avatar.className = 'slop-post-avatar';
-    if (postContent.avatarUrl) {
-      const img = document.createElement('img');
-      img.src = postContent.avatarUrl;
-      avatar.appendChild(img);
-    } else {
-      // Fallback: show first letter of display name or handle
-      const initial = (postContent.author?.[0] || postContent.handle?.[1] || '?').toUpperCase();
-      const fallback = document.createElement('span');
-      fallback.className = 'slop-avatar-initial';
-      fallback.textContent = initial;
-      avatar.appendChild(fallback);
-    }
+// Twitter-style filtered-post card: avatar + body (name/handle, text, optional
+// quote, media, reasoning). LinkedIn shares this function but rearranges
+// avatar+meta into a header above a full-width body, swaps in LinkedIn-style
+// name/headline/time elements, and adds a "…more" expander for long text.
+// See buildYouTubeCard for the thumbnail-first YouTube layout.
+function buildTwitterCard(post: FilteredPost): HTMLElement {
+  const isLinkedIn = _deps.adapter.siteId === 'linkedin';
+  const { post: postContent } = post;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'slop-post-wrapper';
+
+  // Main post row: avatar + body
+  const postRow = document.createElement('div');
+  postRow.className = 'slop-post';
+
+  // Avatar — show image if available, otherwise show initial as fallback
+  const avatar = document.createElement('div');
+  avatar.className = 'slop-post-avatar';
+  const isShort = !!postContent.postUrl?.includes('/shorts/');
+  if (postContent.avatarUrl) {
+    const img = document.createElement('img');
+    img.src = postContent.avatarUrl;
+    avatar.appendChild(img);
+  } else if (isShort) {
+    // Shorts don't expose channel info in the lockup payload, so an avatar
+    // initial would just be "?". Render the Shorts glyph instead.
+    avatar.classList.add('slop-avatar-shorts');
+    avatar.replaceChildren(parseHTML(
+      '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">' +
+      '<path d="M17.77 10.32l-1.2-.5L18 9.06a3.74 3.74 0 0 0-3.5-6.62L6.18 6.83a3.74 3.74 0 0 0 .04 6.62l1.2.5L6 14.94a3.74 3.74 0 0 0 3.5 6.62l8.32-4.39a3.74 3.74 0 0 0-.04-6.85zM10 15.5v-7l6 3.5-6 3.5z" fill="currentColor"/>' +
+      '</svg>'
+    ));
+  } else {
+    // Fallback: show first letter of display name or handle
+    const initial = (postContent.author?.[0] || postContent.handle?.[1] || '?').toUpperCase();
+    const fallback = document.createElement('span');
+    fallback.className = 'slop-avatar-initial';
+    fallback.textContent = initial;
+    avatar.appendChild(fallback);
+  }
+  // linkedin adaptation: avatar gets appended later as part of the header row
+  // (above the body). For everything else it goes side-by-side with the body.
+  if (!isLinkedIn) {
     postRow.appendChild(avatar);
+  }
 
-    // Body
-    const body = document.createElement('div');
-    body.className = 'slop-post-body';
+  // Body
+  const body = document.createElement('div');
+  body.className = 'slop-post-body';
 
-    // Top row: meta + category tag
-    const top = document.createElement('div');
-    top.className = 'slop-post-top';
+  // Top row: meta + category tag
+  const top = document.createElement('div');
+  top.className = 'slop-post-top';
 
-    const meta = document.createElement('div');
-    meta.className = 'slop-post-meta';
+  const meta = document.createElement('div');
+  meta.className = 'slop-post-meta';
+  if (isLinkedIn) {
+    // linkedin adaptation: structured 3-row header matching LinkedIn's
+    // native card. Row 1: [name] [in badge] • [degree]; Row 2: [headline,
+    // truncated]; Row 3: [time] • [globe icon].
+    const nameRow = document.createElement('div');
+    nameRow.className = 'slop-post-name-row';
+    if (postContent.author) {
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'slop-post-name';
+      nameSpan.textContent = postContent.author;
+      nameRow.appendChild(nameSpan);
+    }
+    nameRow.appendChild(_liLinkedInBadge());
+    if (postContent.degree) {
+      const sep = document.createElement('span');
+      sep.className = 'slop-post-degree-sep';
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = ' • ';
+      nameRow.appendChild(sep);
+      const degSpan = document.createElement('span');
+      degSpan.className = 'slop-post-degree';
+      degSpan.textContent = postContent.degree;
+      nameRow.appendChild(degSpan);
+    }
+    meta.appendChild(nameRow);
+
+    if (postContent.handle) {
+      // LinkedIn re-purposes the handle slot as the author's headline.
+      const headline = document.createElement('span');
+      headline.className = 'slop-post-handle slop-post-linkedin-headline';
+      headline.textContent = postContent.handle;
+      meta.appendChild(headline);
+    }
+
+    if (postContent.timeText) {
+      const timeRow = document.createElement('div');
+      timeRow.className = 'slop-post-time-row';
+      const timeSpan = document.createElement('span');
+      timeSpan.textContent = postContent.timeText;
+      timeRow.appendChild(timeSpan);
+      const sep = document.createElement('span');
+      sep.setAttribute('aria-hidden', 'true');
+      sep.textContent = ' • ';
+      timeRow.appendChild(sep);
+      timeRow.appendChild(_liGlobeIcon());
+      meta.appendChild(timeRow);
+    }
+  } else {
     if (postContent.author) {
       // Extract display name — author field has "DisplayName@handle · time" concatenated
       // Use handle to split if available, otherwise use full author string
@@ -1944,198 +2373,176 @@ export function renderFilteredPostsView(container: Element) {
       nameSpan.textContent = displayName;
       meta.appendChild(nameSpan);
     }
-    if (postContent.handle || postContent.timeText) {
+    // YouTube's `handle` (e.g. "/@channel") and `timeText` (e.g. "1.2M views • 3 months ago")
+    // aren't meaningful identity in the filtered card the way Twitter's `@handle` / "2h" are.
+    if ((postContent.handle || postContent.timeText) && _deps.adapter.siteId !== 'youtube') {
       const handleSpan = document.createElement('span');
       handleSpan.className = 'slop-post-handle';
       const parts = [postContent.handle, postContent.timeText].filter(Boolean);
       handleSpan.textContent = parts.join(' · ');
       meta.appendChild(handleSpan);
     }
-    top.appendChild(meta);
+  }
+  top.appendChild(meta);
 
-    if (post.category) {
-      // table_yesno (LiteRT-LM local Gemma) produces a comma-joined list of
-      // matched categories; the single-category XML path stores one name.
-      // Either way, split + render one badge per match. Wrap the tags in a
-      // flex group so `.slop-post-top`'s `justify-content: space-between`
-      // doesn't distribute siblings across the right column — keep them
-      // 5px apart instead.
-      const names = post.category.split(',').map(s => s.trim()).filter(Boolean);
-      if (names.length > 0) {
-        const tagGroup = document.createElement('div');
-        tagGroup.style.display = 'flex';
-        tagGroup.style.gap = '5px';
-        tagGroup.style.marginLeft = '8px';
-        for (const name of names) {
-          const tag = document.createElement('span');
-          tag.className = 'slop-category-tag';
-          tag.style.marginLeft = '0';
-          tag.textContent = name.toUpperCase();
-          tagGroup.appendChild(tag);
-        }
-        top.appendChild(tagGroup);
+  if (post.category) {
+    // table_yesno (LiteRT-LM local Gemma) produces a comma-joined list of
+    // matched categories; the single-category XML path stores one name.
+    // Either way, split + render one badge per match. Wrap the tags in a
+    // flex group so `.slop-post-top`'s `justify-content: space-between`
+    // doesn't distribute siblings across the right column — keep them
+    // 5px apart instead.
+    const names = post.category.split(',').map(s => s.trim()).filter(Boolean);
+    if (names.length > 0) {
+      const tagGroup = document.createElement('div');
+      tagGroup.style.display = 'flex';
+      tagGroup.style.gap = '5px';
+      tagGroup.style.marginLeft = '8px';
+      for (const name of names) {
+        const tag = document.createElement('span');
+        tag.className = 'slop-category-tag';
+        tag.style.marginLeft = '0';
+        tag.textContent = name.toUpperCase();
+        tagGroup.appendChild(tag);
       }
+      top.appendChild(tagGroup);
     }
-    body.appendChild(top);
+  }
+  body.appendChild(top);
 
-    // Tweet text — use sanitized HTML to preserve links/emojis/formatting
-    if (postContent.textHtml) {
-      const textDiv = document.createElement('div');
-      textDiv.className = 'slop-post-text';
-      textDiv.replaceChildren(DOMPurify.sanitize(postContent.textHtml, { RETURN_DOM_FRAGMENT: true }));
-      body.appendChild(textDiv);
-    } else if (post.evaluationText) {
-      const textDiv = document.createElement('div');
-      textDiv.className = 'slop-post-text';
-      textDiv.textContent = post.evaluationText;
-      body.appendChild(textDiv);
-    }
+  // Tweet text — use sanitized HTML to preserve links/emojis/formatting
+  let textDiv: HTMLElement | null = null;
+  if (postContent.textHtml) {
+    textDiv = document.createElement('div');
+    textDiv.className = 'slop-post-text';
+    textDiv.replaceChildren(DOMPurify.sanitize(postContent.textHtml, { RETURN_DOM_FRAGMENT: true }));
+    body.appendChild(textDiv);
+  } else if (post.evaluationText) {
+    textDiv = document.createElement('div');
+    textDiv.className = 'slop-post-text';
+    textDiv.textContent = post.evaluationText;
+    body.appendChild(textDiv);
+  }
 
-    // Quote tweet — render as a mini-card with avatar, author, and text
-    if (postContent.quote) {
-      const quoteBox = document.createElement('div');
-      quoteBox.className = 'slop-quote-box';
-
-      // Quote header: avatar + author info
-      const quoteHeader = document.createElement('div');
-      quoteHeader.className = 'slop-quote-header';
-
-      if (postContent.quote.avatarUrl) {
-        const qAvatar = document.createElement('img');
-        qAvatar.className = 'slop-quote-avatar';
-        qAvatar.src = postContent.quote.avatarUrl;
-        quoteHeader.appendChild(qAvatar);
-      }
-
-      if (postContent.quote.author) {
-        let qDisplayName = postContent.quote.author;
-        if (postContent.quote.handle) {
-          const idx = qDisplayName.indexOf(postContent.quote.handle);
-          if (idx > 0) qDisplayName = qDisplayName.substring(0, idx);
-        }
-        const qName = document.createElement('span');
-        qName.className = 'slop-quote-name';
-        qName.textContent = qDisplayName;
-        quoteHeader.appendChild(qName);
-      }
-      if (postContent.quote.handle || postContent.quote.timeText) {
-        const qMeta = document.createElement('span');
-        qMeta.className = 'slop-quote-handle';
-        const parts = [postContent.quote.handle, postContent.quote.timeText].filter(Boolean);
-        qMeta.textContent = parts.join(' · ');
-        quoteHeader.appendChild(qMeta);
-      }
-      quoteBox.appendChild(quoteHeader);
-
-      // Quote text
-      if (postContent.quote.textHtml) {
-        const quoteText = document.createElement('div');
-        quoteText.className = 'slop-quote-text';
-        quoteText.replaceChildren(DOMPurify.sanitize(postContent.quote.textHtml, { RETURN_DOM_FRAGMENT: true }));
-        quoteBox.appendChild(quoteText);
-      }
-
-      body.appendChild(quoteBox);
-    }
-
-    // Images (skip if media was blurred/age-restricted on the platform)
-    if (postContent.imageUrls && postContent.imageUrls.length > 0 && !postContent.mediaBlurred) {
-      const mediaContainer = document.createElement('div');
-      mediaContainer.className = 'slop-media-container';
-      postContent.imageUrls.forEach(url => {
-        const img = document.createElement('img');
-        img.src = url;
-        img.className = 'slop-media-image';
-        img.loading = 'lazy';
-        mediaContainer.appendChild(img);
+  // linkedin adaptation: collapse long posts to ~5 lines with a "…more"
+  // button, matching LinkedIn's own expandable post behaviour.
+  if (isLinkedIn && textDiv) {
+    const textLen = textDiv.textContent?.length ?? 0;
+    if (textLen > 280) {
+      const collapsibleEl = textDiv;
+      collapsibleEl.classList.add('slop-post-text--collapsible');
+      const expandBtn = document.createElement('button');
+      expandBtn.className = 'slop-post-expand-btn';
+      expandBtn.textContent = '…more';
+      expandBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        collapsibleEl.classList.remove('slop-post-text--collapsible');
+        expandBtn.remove();
       });
-      body.appendChild(mediaContainer);
+      body.appendChild(expandBtn);
+    }
+  }
+
+  // Quote tweet — render as a mini-card with avatar, author, and text
+  if (postContent.quote) {
+    const quoteBox = document.createElement('div');
+    quoteBox.className = 'slop-quote-box';
+
+    // Quote header: avatar + author info
+    const quoteHeader = document.createElement('div');
+    quoteHeader.className = 'slop-quote-header';
+
+    if (postContent.quote.avatarUrl) {
+      const qAvatar = document.createElement('img');
+      qAvatar.className = 'slop-quote-avatar';
+      qAvatar.src = postContent.quote.avatarUrl;
+      quoteHeader.appendChild(qAvatar);
     }
 
-    // Reasoning
-    const reasoning = document.createElement('div');
-    reasoning.className = 'slop-post-reasoning';
-    reasoning.textContent = cleanReasoning(post.reasoning) || 'Filtered';
-    body.appendChild(reasoning);
-
-    // Actions row
-    const actions = document.createElement('div');
-    actions.className = 'slop-post-actions';
-
-    const restoreBtn = document.createElement('button');
-    restoreBtn.className = 'slop-restore';
-    restoreBtn.textContent = 'Restore';
-    restoreBtn.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      chrome.runtime.sendMessage({
-        type: 'sendFeedback',
-        siteId: _deps.adapter.siteId,
-        tweetData: { text: post.evaluationText, imageUrls: postContent.imageUrls || [] },
-        rawResponse: post.rawResponse || '',
-        reasoning: post.reasoning || '',
-        decision: 'false_positive'
-      }).catch(err => console.error('[Bouncer] Undo feedback error:', err));
-
-      // Remove from filtered posts list
-      const key = postContent.postUrl || post.evaluationText.substring(0, 200);
-      const idx = filteredPosts.findIndex(p => (p.post.postUrl || p.evaluationText.substring(0, 200)) === key);
-      if (idx !== -1) filteredPosts.splice(idx, 1);
-      filteredPostKeys.delete(key);
-
-      // Try to unhide original article in the feed
-      for (const article of _deps.findPosts()) {
-        const postUrl = _deps.adapter.getPostUrl(article);
-        if (postUrl && postContent.postUrl && postUrl.includes(postContent.postUrl)) {
-          const container = _deps.adapter.getPostContainer(article);
-          container.style.display = '';
-          container.style.visibility = '';
-          delete container.dataset.filteredByExtension;
-          article.style.opacity = '';
-          article.style.transition = '';
-          _deps.processedPosts.delete(article);
-          markPostVerified(article);
-          break;
-        }
+    if (postContent.quote.author) {
+      let qDisplayName = postContent.quote.author;
+      if (postContent.quote.handle) {
+        const idx = qDisplayName.indexOf(postContent.quote.handle);
+        if (idx > 0) qDisplayName = qDisplayName.substring(0, idx);
       }
+      const qName = document.createElement('span');
+      qName.className = 'slop-quote-name';
+      qName.textContent = qDisplayName;
+      quoteHeader.appendChild(qName);
+    }
+    if (postContent.quote.handle || postContent.quote.timeText) {
+      const qMeta = document.createElement('span');
+      qMeta.className = 'slop-quote-handle';
+      const parts = [postContent.quote.handle, postContent.quote.timeText].filter(Boolean);
+      qMeta.textContent = parts.join(' · ');
+      quoteHeader.appendChild(qMeta);
+    }
+    quoteBox.appendChild(quoteHeader);
 
-      // Override cache so re-evaluation keeps post visible
-      chrome.runtime.sendMessage({
-        type: 'overrideCacheEntry',
-        post: post.evaluationText,
-        imageUrls: postContent.imageUrls || [],
-        shouldHide: false,
-        reasoning: 'User reported: false positive'
-      }).catch(err => console.error('[Bouncer] Override cache error:', err));
+    // Quote text
+    if (postContent.quote.textHtml) {
+      const quoteText = document.createElement('div');
+      quoteText.className = 'slop-quote-text';
+      quoteText.replaceChildren(DOMPurify.sanitize(postContent.quote.textHtml, { RETURN_DOM_FRAGMENT: true }));
+      quoteBox.appendChild(quoteText);
+    }
 
-      updateFilteredTabCount();
-      const outerContainer = restoreBtn.closest('.filtered-view-container') || restoreBtn.closest('.ff-ios-filtered-modal-backdrop');
-      const innerContainer = outerContainer?.querySelector('.filtered-modal-content') || outerContainer?.querySelector('.ff-ios-filtered-modal-content');
-      if (innerContainer) renderFilteredPostsView(innerContainer);
+    body.appendChild(quoteBox);
+  }
+
+  // Images (skip if media was blurred/age-restricted on the platform).
+  // Prefer the adapter's higher-quality display URLs when present
+  // (e.g. YouTube's original AVIF/JPEG lockup thumb); fall back to the
+  // classifier payload (smaller, JPEG-only).
+  const displayUrls = postContent.displayImageUrls?.length
+    ? postContent.displayImageUrls
+    : postContent.imageUrls;
+  if (displayUrls && displayUrls.length > 0 && !postContent.mediaBlurred) {
+    const mediaContainer = document.createElement('div');
+    mediaContainer.className = 'slop-media-container';
+    displayUrls.forEach(url => {
+      const img = document.createElement('img');
+      img.src = url;
+      img.className = 'slop-media-image';
+      img.loading = 'lazy';
+      mediaContainer.appendChild(img);
     });
-    actions.appendChild(restoreBtn);
-    body.appendChild(actions);
+    body.appendChild(mediaContainer);
+  }
 
+  // Reasoning
+  const reasoning = document.createElement('div');
+  reasoning.className = 'slop-post-reasoning';
+  reasoning.textContent = cleanReasoning(post.reasoning) || 'Filtered';
+  body.appendChild(reasoning);
+
+  // Actions row
+  const actions = document.createElement('div');
+  actions.className = 'slop-post-actions';
+  actions.appendChild(createRestoreButton(post, postContent));
+  body.appendChild(actions);
+
+  if (isLinkedIn) {
+    // linkedin adaptation: header row (avatar + meta/top) sits ABOVE the
+    // full-width body. The top block was appended to body earlier; pull it
+    // back out so it lives in the header instead.
+    const liHeader = document.createElement('div');
+    liHeader.className = 'slop-post-linkedin-header';
+    liHeader.appendChild(avatar);
+    body.removeChild(top);
+    liHeader.appendChild(top);
+    postRow.classList.add('slop-post--linkedin');
+    postRow.appendChild(liHeader);
     postRow.appendChild(body);
+  } else {
+    postRow.appendChild(body);
+  }
 
-    // Wrap in a real <a> so middle-click / ctrl-click open in new tab natively
-    if (postContent.postUrl) {
-      const link = document.createElement('a');
-      link.href = postContent.postUrl;
-      link.className = 'slop-post-link';
-      link.addEventListener('click', (e) => {
-        if ((e.target as Element).closest('button, [role="button"], .slop-restore, .slop-post-actions')) {
-          e.preventDefault();
-        }
-      });
-      link.appendChild(postRow);
-      wrapper.appendChild(link);
-    } else {
-      wrapper.appendChild(postRow);
-    }
+  // Wrap in a real <a> so middle-click / ctrl-click open in new tab natively
+  wrapper.appendChild(wrapInPostLink(postRow, postContent.postUrl));
 
-    postsContainer.appendChild(wrapper);
-  });
+  return wrapper;
 }
 
 // ==================== Filtered Post Storage ====================
@@ -2695,7 +3102,9 @@ async function fetchReasoningIfNeeded(article: HTMLElement) {
     let response: { found?: boolean; shouldHide?: boolean; reasoning?: string; rawResponse?: string } | undefined = await chrome.runtime.sendMessage({
       type: 'getReasoning',
       post: formatPostForEvaluation(content),
-      imageUrls: content.imageUrls || []
+      imageUrls: content.imageUrls || [],
+      postUrl: content.postUrl || null,
+      siteId: _deps.adapter.siteId
     });
 
     // If not found, try with plain text (DOM re-renders may change HTML but not text)
@@ -2703,7 +3112,9 @@ async function fetchReasoningIfNeeded(article: HTMLElement) {
       response = await chrome.runtime.sendMessage({
         type: 'getReasoning',
         post: content.text,
-        imageUrls: content.imageUrls || []
+        imageUrls: content.imageUrls || [],
+        postUrl: content.postUrl || null,
+        siteId: _deps.adapter.siteId
       });
     }
 
@@ -2785,7 +3196,20 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
     const positionTooltip = () => {
       const btnRect = btn.getBoundingClientRect();
       tooltip.style.position = 'fixed';
-      tooltip.style.right = `${document.documentElement.clientWidth - btnRect.right}px`;
+      // Horizontal: default right-aligned so the tooltip extends LEFT from the
+      // button (fine on Twitter / desktop YouTube). If that would push it off
+      // the left edge — common on narrow YouTube-mobile where the button sits
+      // near the left — left-align instead so it extends rightward on-screen.
+      tooltip.style.left = '';
+      tooltip.style.right = '';
+      const edgeMargin = 8;
+      if (btnRect.right - tooltip.offsetWidth < edgeMargin) {
+        tooltip.style.left = `${Math.max(edgeMargin, btnRect.left)}px`;
+        tooltip.classList.add('ff-annoying-tooltip--align-left');
+      } else {
+        tooltip.style.right = `${document.documentElement.clientWidth - btnRect.right}px`;
+        tooltip.classList.remove('ff-annoying-tooltip--align-left');
+      }
       // Place above the button; if clipped, place below
       tooltip.style.bottom = '';
       tooltip.style.top = '';
@@ -2864,6 +3288,7 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
         chrome.runtime.sendMessage({
           type: 'sendFeedback',
           siteId: _deps.adapter.siteId,
+          postUrl: content.postUrl || null,
           tweetData: { text: formatPostForEvaluation(content), imageUrls: content.imageUrls || [] },
           rawResponse: reasoning?.rawResponse || '',
           reasoning: reasoning?.reasoning || '',
@@ -2878,6 +3303,8 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
           type: 'overrideCacheEntry',
           post: formatPostForEvaluation(content),
           imageUrls: content.imageUrls || [],
+          postUrl: content.postUrl || null,
+          siteId: _deps.adapter.siteId,
           shouldHide: true,
           reasoning: 'User reported: should have been filtered'
         }).catch(err => console.error('[Bouncer] Override cache error:', err));
@@ -2949,6 +3376,8 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
           type: 'overrideCacheEntry',
           post: formatPostForEvaluation(content),
           imageUrls: content.imageUrls || [],
+          postUrl: content.postUrl || null,
+          siteId: _deps.adapter.siteId,
           shouldHide: true,
           reasoning
         }).catch(err => console.error('[Bouncer] Override cache error:', err));
@@ -2987,6 +3416,7 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
         chrome.runtime.sendMessage({
           type: 'sendFeedback',
           siteId: _deps.adapter.siteId,
+          postUrl: content.postUrl || null,
           tweetData: { text: formatPostForEvaluation(content), imageUrls: content.imageUrls || [] },
           rawResponse: reasoning?.rawResponse || '',
           reasoning: reasoning?.reasoning || '',
@@ -3001,6 +3431,8 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
           type: 'overrideCacheEntry',
           post: formatPostForEvaluation(content),
           imageUrls: content.imageUrls || [],
+          postUrl: content.postUrl || null,
+          siteId: _deps.adapter.siteId,
           shouldHide: true,
           reasoning: 'User reported: should have been filtered'
         }).catch(err => console.error('[Bouncer] Override cache error:', err));
@@ -3068,6 +3500,14 @@ export function handleDOMMutation() {
   }
   if (mobileFilterContainer && !mobileFilterContainer.isConnected) {
     mobileFilterContainer = null;
+  }
+  if (_deps.adapter.filterBoxPlacement === 'banner') {
+    if (!filterPhrasesContainer) {
+      injectBannerFilterBox();
+    } else {
+      updateBannerFilterVisibility();
+    }
+    return;
   }
   // Inject filter phrases input if not present
   if (!filterPhrasesContainer && document.querySelector(_deps.adapter.selectors.sidebar)) {

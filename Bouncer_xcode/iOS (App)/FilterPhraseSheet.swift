@@ -50,20 +50,87 @@ class FilterSheetViewModel: ObservableObject {
     // has the on-device model selected.
     @Published var selectedModel: String = ""
     @Published var filterReplies: Bool = true
+    // Which platform's filter phrases the sheet is currently viewing/editing.
+    // Independent of the page the WebView is on — the dropdown lets the user
+    // manage X or YouTube phrases from anywhere. "twitter" | "youtube".
+    @Published var selectedPlatform: String = "twitter"
+    // When true, FilteredWebViewContainer renders PlatformPickerView over the
+    // WebView. Toggled by the Home button in the filter sheet; cleared when the
+    // user picks a platform.
+    @Published var showingPlatformPicker: Bool = false
 
     weak var webView: WKWebView?
 
     static let contentWorld = WKContentWorld.world(name: "feedfilter")
 
-    func addPhrase(_ text: String) {
+    // Default the sheet's phrase list to the platform of the page currently
+    // loaded — registry-driven so adding a new platform doesn't require a new
+    // host-substring branch here.
+    func syncPlatformToCurrentSite() {
+        let host = (URL(string: currentURL)?.host ?? "").lowercased()
+        selectedPlatform = Platforms.fromHost(host)?.id ?? "twitter"
+    }
+
+    func selectPlatform(_ platform: String) {
+        guard platform != selectedPlatform else { return }
+        selectedPlatform = platform
+        loadPhrases()
+    }
+
+    // Called by the PlatformPickerView when the user picks a platform. Updates
+    // the active platform AND navigates the WebView to that platform's feed
+    // URL — registry lookup keeps this in sync with the picker / WebView
+    // initial-URL logic without separate hardcoded switches.
+    func selectPlatformAndNavigate(_ platform: String) {
+        selectedPlatform = platform
+        loadPhrases()
+        guard let webView = webView, let def = Platforms.byId(platform),
+              let url = URL(string: def.feedURL) else { return }
+        webView.load(URLRequest(url: url))
+    }
+
+    // Load the selected platform's phrases from the (shared, native-backed)
+    // store via the per-platform bridge — works regardless of which site the
+    // WebView is on.
+    func loadPhrases() {
         guard let webView = webView else { return }
-        Task {
-            try? await webView.callAsyncJavaScript(
-                "return await window.__ff_addPhrase(text)",
-                arguments: ["text": text],
+        let platform = selectedPlatform
+        Task { @MainActor in
+            do {
+                let result = try await webView.callAsyncJavaScript(
+                    "return await window.__ff_getPhrases(siteId)",
+                    arguments: ["siteId": platform],
+                    in: nil,
+                    contentWorld: Self.contentWorld
+                )
+                // Ignore a stale response if the user switched platforms mid-flight.
+                guard platform == self.selectedPlatform else { return }
+                if let arr = result as? [String] {
+                    self.phrases = arr
+                } else if let arr = result as? [Any] {
+                    self.phrases = arr.compactMap { $0 as? String }
+                }
+            } catch {
+                print("[FeedFilter] loadPhrases error: \(error)")
+            }
+        }
+    }
+
+    func addPhrase(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        // Optimistic insert for snappiness; loadPhrases reconciles afterward.
+        if !phrases.contains(trimmed) { phrases.append(trimmed) }
+        guard let webView = webView else { return }
+        let platform = selectedPlatform
+        Task { @MainActor in
+            _ = try? await webView.callAsyncJavaScript(
+                "return await window.__ff_addPhraseFor(siteId, text)",
+                arguments: ["siteId": platform, "text": trimmed],
                 in: nil,
                 contentWorld: Self.contentWorld
             )
+            self.loadPhrases()
         }
     }
 
@@ -72,10 +139,11 @@ class FilterSheetViewModel: ObservableObject {
             phrases.removeAll { $0 == phrase }
         }
         guard let webView = webView else { return }
-        Task {
-            try? await webView.callAsyncJavaScript(
-                "return await window.__ff_removePhrase(phrase)",
-                arguments: ["phrase": phrase],
+        let platform = selectedPlatform
+        Task { @MainActor in
+            _ = try? await webView.callAsyncJavaScript(
+                "return await window.__ff_removePhraseFor(siteId, phrase)",
+                arguments: ["siteId": platform, "phrase": phrase],
                 in: nil,
                 contentWorld: Self.contentWorld
             )
@@ -350,7 +418,9 @@ class FilterSheetViewModel: ObservableObject {
     @MainActor
     func getStorage(keys: [String]) async -> [String: Any] {
         guard let webView = webView else { return [:] }
-        await ensureOnX(webView: webView)
+        // No ensureOnX: chrome.storage is now a native store shared across
+        // origins, and the __ff_* bridge is present on whatever site (x.com /
+        // m.youtube.com) the WebView is currently showing.
         do {
             let result = try await webView.callAsyncJavaScript(
                 "return await window.__ff_getStorage(keys)",
@@ -368,7 +438,8 @@ class FilterSheetViewModel: ObservableObject {
     @MainActor
     func setStorage(_ items: [String: Any]) async {
         guard let webView = webView else { return }
-        await ensureOnX(webView: webView)
+        // No ensureOnX — see getStorage. Writing the current site's key fires
+        // chrome.storage.onChanged in-page so content.js re-evaluates.
         do {
             let _ = try await webView.callAsyncJavaScript(
                 "return await window.__ff_setStorage(items)",
@@ -646,6 +717,20 @@ struct FilterPhraseSheet: View {
             .navigationTitle("Filter out")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        // Dismiss the sheet first so the picker overlay can
+                        // take over the screen, then ask the container to
+                        // render PlatformPickerView. Container reads the flag
+                        // off the same shared viewModel.
+                        viewModel.isPresented = false
+                        viewModel.showingPlatformPicker = true
+                    } label: {
+                        Image(systemName: "house")
+                            .font(.system(size: 17, weight: .regular))
+                    }
+                    .accessibilityLabel("Switch platform")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         viewModel.shareFilterPack()
@@ -670,6 +755,8 @@ struct FilterPhraseSheet: View {
         .scrollDismissesKeyboard(.interactively)
         .onAppear {
             viewModel.loadAiTextFilterEnabled()
+            viewModel.syncPlatformToCurrentSite()
+            viewModel.loadPhrases()
         }
     }
 
@@ -759,6 +846,9 @@ struct BouncerSettingsView: View {
                 }
             }
 
+            // Site-specific settings, mirroring the desktop popup's per-platform
+            // accordions. Unlike desktop, iOS intentionally omits the per-site
+            // "enable Bouncer" master toggles — filtering is always on per site.
             Section {
                 Toggle(isOn: Binding(
                     get: { viewModel.filterReplies },
@@ -766,8 +856,15 @@ struct BouncerSettingsView: View {
                 )) {
                     Text("Filter replies in conversations")
                 }
+            } header: {
+                Text("X (Twitter)")
             }
 
+            // Note: YouTube's "show placeholder" toggle is intentionally omitted
+            // on iOS — filtered videos are always removed (hidden) on mobile.
+
+            // AI text/image detection is available when either Imbue is configured
+            // OR the on-device classifier model has been picked.
             if hasImbueBackend || viewModel.selectedModel == kIosLocalGemmaModelKey {
                 Section {
                     Toggle(isOn: Binding(
@@ -1308,11 +1405,21 @@ struct ProvidersSettingsView: View {
 struct FilteredWebViewContainer: View {
     @StateObject var viewModel = FilterSheetViewModel()
     @State private var isOnboarded = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+    // Show the platform picker on launch (after onboarding) so the user
+    // chooses a feed first instead of landing on X by default. Once they
+    // pick, the WebView mounts; tapping the Home button in the filter sheet
+    // sets viewModel.showingPlatformPicker back to true to re-show this
+    // overlay (and we keep the WebView mounted under it so picking the same
+    // platform doesn't force a fresh page load).
+    @State private var hasChosenPlatform = false
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
                 ZStack {
-                    if isOnboarded {
+                    // Only mount the WebView once the user has chosen a
+                    // platform. Before that, the PlatformPickerView overlay
+                    // (below) is the entire visible surface.
+                    if isOnboarded && hasChosenPlatform {
                         FilteredWebView(sheetViewModel: viewModel)
                     }
 
@@ -1368,6 +1475,24 @@ struct FilteredWebViewContainer: View {
                 if newValue {
                     viewModel.setPanelOpen(true)
                 }
+            }
+
+            // Platform picker shown:
+            //   (1) on first launch after onboarding (hasChosenPlatform=false)
+            //   (2) whenever the Home button in the filter sheet flips
+            //       viewModel.showingPlatformPicker to true.
+            // Picking always seeds `viewModel.selectedPlatform` and (when the
+            // WebView is already mounted) navigates to the platform's feed.
+            if isOnboarded && (!hasChosenPlatform || viewModel.showingPlatformPicker) {
+                PlatformPickerView { platformId in
+                    viewModel.selectPlatformAndNavigate(platformId)
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        viewModel.showingPlatformPicker = false
+                        hasChosenPlatform = true
+                    }
+                }
+                .transition(.opacity)
+                .zIndex(1)
             }
 
             // Onboarding overlays on top; fades + scales out on dismiss
