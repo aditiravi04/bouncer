@@ -1186,7 +1186,7 @@ function renderShareBack(back: HTMLElement, entries: FilterEntry[], scene: HTMLE
     postBtn.disabled = true;
     postBtn.textContent = 'Opening…';
     const restore = () => { postBtn.textContent = 'Post to X'; postBtn.disabled = false; };
-    const caption = `I used Bouncer to remove ${entry.phrase} from my feed.`;
+    const caption = `I removed ${entry.phrase} from my X feed using Bouncer.`;
     // Build the share URL and the "Filter out <phrase>" card image in parallel,
     // then open the composer with both.
     Promise.all([buildFiltersShareUrl(entry), renderFilterCardImage([entry])])
@@ -1368,15 +1368,15 @@ async function openXComposerModal(caption: string, image?: File): Promise<boolea
     return true;
   }
 
-  // Desktop: DraftJS contenteditable. insertText is the canonical path; if it
-  // doesn't take, fall back to a synthetic paste carrying the same text, which
-  // X's composer also handles (same code path as Cmd-V of a link).
-  document.execCommand('insertText', false, caption);
-  if (!editor.textContent) {
-    const dt = new DataTransfer();
-    dt.setData('text/plain', caption);
-    editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-  }
+  // Desktop: DraftJS contenteditable. Insert via a synthetic paste — the same
+  // code path as a real Cmd-V. We deliberately do NOT use
+  // execCommand('insertText'): with a multi-line caption (sentence + blank line
+  // + URL) X's DraftJS composer mangles it — it drops the sentence and inserts
+  // the URL twice. DraftJS's paste handler processes the same text correctly,
+  // keeping the sentence and linkifying the URL once.
+  const textDt = new DataTransfer();
+  textDt.setData('text/plain', caption);
+  editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: textDt, bubbles: true, cancelable: true }));
 
   // Attach the "Filter out …" card image by pasting the File into the composer —
   // X ingests a pasted image File the same as a Cmd-V of an image.
