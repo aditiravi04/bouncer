@@ -3059,7 +3059,10 @@ body.ff-ios .ff-ios-page.dark-mode .ff-ios-page-header {
   color: rgba(255, 255, 255, 0.55);
 }
 
-/* ==================== Share picker modal ==================== */
+/* ==================== Shared modal chrome (overlay + modal shell) ====================
+   Base overlay/modal/title/button styles shared by the import-confirm modal.
+   (The old share-picker modal that also used these was removed; its
+   picker-only rules — list/row/empty — have been deleted.) */
 .ff-share-modal-overlay {
   display: flex;
   position: fixed;
@@ -3087,32 +3090,6 @@ body.ff-ios .ff-ios-page.dark-mode .ff-ios-page-header {
 }
 .ff-share-modal-overlay.visible .ff-share-modal { transform: scale(1); }
 .ff-share-modal-title { font-size: 18px; font-weight: 800; margin-bottom: 16px; }
-.ff-share-empty { font-size: 14px; color: rgb(113, 118, 123); }
-.ff-share-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 50vh;
-  overflow-y: auto;
-}
-.ff-share-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  background-color: rgb(22, 24, 28);
-}
-.ff-share-row-phrase {
-  flex: 1;
-  min-width: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: rgb(231, 233, 234);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .ff-share-modal-btn {
   appearance: none;
   border: none;
@@ -3125,24 +3102,183 @@ body.ff-ios .ff-ios-page.dark-mode .ff-ios-page-header {
 }
 .ff-share-modal-copy { background-color: rgb(29, 155, 240); color: #fff; }
 .ff-share-modal-copy:hover { background-color: rgb(26, 140, 216); }
-.ff-share-row-post {
-  background-color: transparent;
-  color: rgb(231, 233, 234);
-  border: 1px solid rgb(83, 100, 113);
-}
-.ff-share-row-post:hover { background-color: rgba(239, 243, 244, 0.1); }
 .ff-share-modal.light-mode {
   background-color: #fff;
   color: rgb(15, 20, 25);
 }
-.ff-share-modal.light-mode .ff-share-row { background-color: rgb(247, 249, 249); }
-.ff-share-modal.light-mode .ff-share-row-phrase { color: rgb(15, 20, 25); }
-.ff-share-modal.light-mode .ff-share-row-post {
-  color: rgb(15, 20, 25);
-  border-color: rgb(207, 217, 222);
+
+/* ==================== Share flip (Bouncer box → "share a filter" face) ==================== */
+
+/* The scene supplies perspective; the card holds both faces and rotates. Height
+   is pinned inline by JS while flipping (the faces differ in height), then
+   released back to auto once we settle on the front. */
+.filter-flip-scene { perspective: 1600px; }
+
+.filter-flip-card {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1), height 0.35s ease;
 }
-.ff-share-modal.light-mode .ff-share-row-post:hover { background-color: rgba(15, 20, 25, 0.1); }
-.ff-share-modal.light-mode .ff-share-empty { color: rgb(83, 100, 113); }
+
+.filter-flip-scene.flipped .filter-flip-card { transform: rotateY(180deg); }
+
+/* Each face hides its own back so only the forward-facing one shows. The front
+   stays in flow (defines the card's default size); the back overlays it. */
+.filter-flip-front,
+.filter-share-back {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.filter-share-back {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+  transform: rotateY(180deg);
+  /* Match the front card's chrome so the flip lands on an identical box. */
+  padding: 12px 16px;
+  background-color: rgb(0, 0, 0);
+  border: var(--green-border-width) solid rgb(234, 133, 84);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.light-mode .filter-share-back {
+  background-color: rgb(255, 255, 255);
+  border-color: rgb(200, 110, 65);
+}
+
+.ff-share-back-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 9999px;
+  color: rgb(113, 118, 123);
+  line-height: 0;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.ff-share-back-close:hover { background: rgba(234, 133, 84, 0.14); color: rgb(234, 133, 84); }
+.ff-share-back-close svg { width: 16px; height: 16px; fill: currentColor; }
+.light-mode .ff-share-back-close { color: rgb(83, 100, 113); }
+
+.ff-share-back-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgb(113, 118, 123);
+  margin-bottom: 8px;
+}
+.light-mode .ff-share-back-label { color: rgb(83, 100, 113); }
+
+.ff-share-back-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+  color: rgb(231, 233, 234);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.ff-share-back-search::placeholder { color: rgb(113, 118, 123); }
+.ff-share-back-search:focus { border-color: rgb(234, 133, 84); }
+.ff-share-back-search:disabled { opacity: 0.5; cursor: not-allowed; }
+.light-mode .ff-share-back-search {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.15);
+  color: rgb(15, 20, 25);
+}
+
+.ff-share-back-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.ff-share-back-option {
+  appearance: none;
+  text-align: left;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: rgb(231, 233, 234);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  /* Wrap long phrases onto multiple lines instead of truncating them — the
+     results area scrolls, so full text stays readable however long it is. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.ff-share-back-option:hover { background: rgba(255, 255, 255, 0.06); }
+.ff-share-back-option.selected {
+  background: rgba(234, 133, 84, 0.14);
+  border-color: rgba(234, 133, 84, 0.5);
+  color: rgb(234, 133, 84);
+}
+.light-mode .ff-share-back-option { color: rgb(15, 20, 25); }
+.light-mode .ff-share-back-option:hover { background: rgba(0, 0, 0, 0.05); }
+
+.ff-share-back-empty {
+  font-size: 14px;
+  color: rgb(113, 118, 123);
+  padding: 8px 2px;
+}
+
+.ff-share-back-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+.ff-share-back-actions .ff-share-modal-btn { flex: 1; }
+
+/* Bouncer-branded share buttons (warm orange, not the modal's blue). Both read
+   as disabled until a filter is selected — muted, no pointer, no hover. */
+.ff-share-back-copy {
+  background-color: rgb(234, 133, 84);
+  color: #fff;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+.ff-share-back-copy:hover:not(:disabled) { background-color: rgb(222, 118, 68); }
+
+.ff-share-back-post {
+  background-color: transparent;
+  color: rgb(234, 133, 84);
+  border: 1px solid rgb(234, 133, 84);
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+.ff-share-back-post:hover:not(:disabled) { background-color: rgba(234, 133, 84, 0.12); }
+
+.ff-share-back-copy:disabled,
+.ff-share-back-post:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Light mode uses the box's slightly deeper outline orange for better contrast
+   on white. */
+.light-mode .ff-share-back-copy { background-color: rgb(200, 110, 65); }
+.light-mode .ff-share-back-copy:hover:not(:disabled) { background-color: rgb(184, 98, 56); }
+.light-mode .ff-share-back-post { color: rgb(200, 110, 65); border-color: rgb(200, 110, 65); }
+.light-mode .ff-share-back-post:hover:not(:disabled) { background-color: rgba(200, 110, 65, 0.12); }
 
 /* ==================== Import confirm modal ("Apply this filter?") ==================== */
 .ff-import-chips {

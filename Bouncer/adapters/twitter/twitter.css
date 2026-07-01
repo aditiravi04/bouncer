@@ -28,6 +28,19 @@ div[data-testid="BottomBar"] {
   background-color: rgb(21, 32, 43);
 }
 
+/* Share flip back face matches the box background in dim mode. */
+.dim-mode .filter-share-back {
+  background-color: rgb(21, 32, 43);
+}
+
+.dim-mode .ff-share-back-search {
+  color: rgb(231, 233, 234);
+}
+
+.dim-mode .ff-share-back-option {
+  color: rgb(231, 233, 234);
+}
+
 .dim-mode .filter-phrases-label {
   color: rgb(231, 233, 234);
 }

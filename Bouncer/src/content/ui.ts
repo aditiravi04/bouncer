@@ -84,8 +84,6 @@ const annoyingReasonsCache: WeakMap<HTMLElement, Promise<{ reasons: string[]; ha
 // Track previous count for animation
 let previousFilteredCount = 0;
 
-// Track current model loading state
-
 // Track if we've shown the API key warning
 let apiKeyWarningShown = false;
 
@@ -1009,22 +1007,210 @@ export function syncFilterPhrases() {
 
 // ==================== Share Filter Pack ====================
 
-
+// X-style back arrow used by the share face to flip the box back to its filters.
+const backIconSVG = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><g><path d="M7.414 13l5.043 5.04-1.414 1.42L3.586 12l7.457-7.46 1.414 1.42L7.414 11H21v2H7.414z"></path></g></svg>';
 
 let sharingFilterPackInProgress = false;
 
-async function shareFilterPack(_container: HTMLElement): Promise<void> {
+// Click the share button → flip the Bouncer box to its "share a filter" face.
+// Clicking again (or the back arrow / Escape) flips it back. Deliberately stays
+// inside the box rather than opening a modal so sharing reads as part of the
+// small, off-to-the-side Bouncer UI.
+async function shareFilterPack(container: HTMLElement): Promise<void> {
   if (sharingFilterPackInProgress) return;
   sharingFilterPackInProgress = true;
 
   try {
+    const front = container.querySelector<HTMLElement>('.filter-phrases-container');
+    if (!front) return;
+    const scene = ensureShareFlip(front);
+
+    // Toggle: a second click on the share button flips back to the filters.
+    if (scene.classList.contains('flipped')) {
+      flipShareCard(scene, false);
+      return;
+    }
+
     const entries = await getFilterEntries(_deps.descriptionsKey);
-    openSharePickerModal(entries);
+    const back = scene.querySelector<HTMLElement>('.filter-share-back');
+    if (back) renderShareBack(back, entries, scene);
+    flipShareCard(scene, true);
   } catch (err) {
     console.error('[Bouncer] shareFilterPack error:', err);
   } finally {
     sharingFilterPackInProgress = false;
   }
+}
+
+// Lazily wrap the front card (`.filter-phrases-container`) in a 3D flip scene the
+// first time the user shares. Built on demand so the initial render, sign-in
+// states, and the iOS off-screen screenshot path stay untouched. Returns the
+// existing scene on subsequent calls.
+function ensureShareFlip(front: HTMLElement): HTMLElement {
+  const existing = front.closest<HTMLElement>('.filter-flip-scene');
+  if (existing) return existing;
+
+  const scene = document.createElement('div');
+  scene.className = 'filter-flip-scene';
+  const card = document.createElement('div');
+  card.className = 'filter-flip-card';
+
+  front.replaceWith(scene);
+  scene.appendChild(card);
+  front.classList.add('filter-flip-front');
+  card.appendChild(front);
+
+  const back = document.createElement('div');
+  back.className = 'filter-share-back';
+  card.appendChild(back);
+
+  return scene;
+}
+
+// Flip the card to the share face (`toShare`) or back to the filters. Height is
+// driven explicitly because the two faces differ in height — the front is in
+// flow, the back is absolutely positioned — so we animate the scene to whichever
+// face is coming into view and release the inline height once we settle back on
+// the front.
+function flipShareCard(scene: HTMLElement, toShare: boolean): void {
+  const card = scene.querySelector<HTMLElement>('.filter-flip-card');
+  if (!card) return;
+  const face = card.querySelector<HTMLElement>(toShare ? '.filter-share-back' : '.filter-flip-front');
+  if (face) card.style.height = `${face.offsetHeight}px`;
+
+  scene.classList.toggle('flipped', toShare);
+
+  if (toShare) {
+    const search = scene.querySelector<HTMLInputElement>('.ff-share-back-search');
+    // Focus after the flip so the caret doesn't ride the rotation.
+    setTimeout(() => search?.focus(), 260);
+    document.addEventListener('keydown', shareFlipEscHandler(scene));
+  } else {
+    // Release the pinned height once the flip-back finishes so the front resumes
+    // sizing itself as the user adds/removes phrases.
+    const done = () => {
+      card.style.height = '';
+      card.removeEventListener('transitionend', done);
+    };
+    card.addEventListener('transitionend', done);
+  }
+}
+
+// One Escape listener per flip; self-removes after firing (or when already
+// flipped back) so we never leak listeners across repeated shares.
+function shareFlipEscHandler(scene: HTMLElement): (e: KeyboardEvent) => void {
+  const handler = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    document.removeEventListener('keydown', handler);
+    if (scene.classList.contains('flipped')) flipShareCard(scene, false);
+  };
+  return handler;
+}
+
+// Render the share face: the Bouncer title, a search box, the list of the user's
+// filters to pick from, and the copy/post actions that appear on selection.
+// Rebuilt fresh on every open so search text and selection never persist between
+// shares.
+function renderShareBack(back: HTMLElement, entries: FilterEntry[], scene: HTMLElement): void {
+  const hasEntries = entries.length > 0;
+  const shell = `
+    <div class="filter-phrases-title-row">
+      <span class="filter-phrases-box-name">Bouncer</span>
+      <button class="ff-share-back-close" type="button" aria-label="Back to filters">${backIconSVG}</button>
+    </div>
+    <div class="ff-share-back-label">Share a filter</div>
+    <input class="ff-share-back-search" type="text" placeholder="Search your filters" aria-label="Search your filters"${hasEntries ? '' : ' disabled'}>
+    <div class="ff-share-back-results" role="listbox"></div>
+    <div class="ff-share-back-empty"${hasEntries ? ' hidden' : ''}>You have no filters to share yet.</div>
+    <div class="ff-share-back-actions">
+      <button class="ff-share-modal-btn ff-share-back-copy" type="button" disabled>Copy link</button>
+      <button class="ff-share-modal-btn ff-share-back-post" type="button" disabled>Post to X</button>
+    </div>
+  `;
+  back.replaceChildren(parseHTML(shell));
+
+  const results = back.querySelector<HTMLElement>('.ff-share-back-results')!;
+  const search = back.querySelector<HTMLInputElement>('.ff-share-back-search')!;
+  const copyBtn = back.querySelector<HTMLButtonElement>('.ff-share-back-copy')!;
+  const postBtn = back.querySelector<HTMLButtonElement>('.ff-share-back-post')!;
+
+  let selected: FilterEntry | null = null;
+
+  const renderOptions = (query: string) => {
+    const q = query.trim().toLowerCase();
+    const matches = q ? entries.filter(e => e.phrase.toLowerCase().includes(q)) : entries;
+    results.replaceChildren();
+    for (const entry of matches) {
+      const opt = document.createElement('button');
+      opt.type = 'button';
+      opt.className = 'ff-share-back-option';
+      opt.setAttribute('role', 'option');
+      opt.textContent = entry.phrase;
+      if (selected?.id === entry.id) opt.classList.add('selected');
+      opt.addEventListener('click', () => {
+        selected = entry;
+        results.querySelectorAll('.ff-share-back-option').forEach(el => el.classList.remove('selected'));
+        opt.classList.add('selected');
+        // A selection is required before the buttons do anything, so they start
+        // disabled and light up here.
+        copyBtn.textContent = 'Copy link';
+        copyBtn.disabled = false;
+        postBtn.disabled = false;
+      });
+      results.appendChild(opt);
+    }
+  };
+
+  renderOptions('');
+  search.addEventListener('input', () => renderOptions(search.value));
+
+  copyBtn.addEventListener('click', () => {
+    if (!selected) return;
+    buildFiltersShareUrl(selected)
+      // DEMO ONLY — copy the local landing file so the link opens without a
+      // deploy (for screen recording). Delete this .replace before shipping.
+      .then(url => url.replace(
+        'https://bouncer.imbue.com/import',
+        'file:///Users/imbueguest/bouncer/Bouncer/hosting/import.html'))
+      .then(url => navigator.clipboard.writeText(url))
+      .then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1500);
+      })
+      .catch(err => console.error('[UI] copy share link failed:', err));
+  });
+
+  postBtn.addEventListener('click', () => {
+    if (!selected) return;
+    const entry = selected;
+    postBtn.disabled = true;
+    postBtn.textContent = 'Opening…';
+    const restore = () => { postBtn.textContent = 'Post to X'; postBtn.disabled = false; };
+    const caption = `I used Bouncer to remove ${entry.phrase} from my feed.`;
+    // Build the share URL and the "Filter out <phrase>" card image in parallel,
+    // then open the composer with both.
+    Promise.all([buildFiltersShareUrl(entry), renderFilterCardImage([entry])])
+      .then(async ([url, image]) => {
+        const opened = await openXComposerModal(`${caption}\n\n${url}`, image);
+        // Leave the Bouncer box exactly as it is behind the composer — don't flip
+        // it back. Flipping on post made the box visibly vanish as the modal
+        // opened; leaving it be keeps it quietly in the background.
+        restore();
+        if (!opened) {
+          // Fallback only when X's in-app compose link isn't on the page
+          // (unexpected layout) — better a new tab than nothing. The image can't
+          // ride an intent URL, so this fallback is text + link only.
+          window.open(
+            `https://x.com/intent/tweet?text=${encodeURIComponent(caption)}&url=${encodeURIComponent(url)}`,
+            '_blank', 'noopener',
+          );
+        }
+      })
+      .catch(err => { console.error('[UI] post share link failed:', err); restore(); });
+  });
+
+  back.querySelector<HTMLButtonElement>('.ff-share-back-close')!
+    .addEventListener('click', () => flipShareCard(scene, false));
 }
 
 async function screenshotFilterBox(box: HTMLElement): Promise<File> {
@@ -1061,17 +1247,24 @@ export async function shareFilterPackForIOS(): Promise<void> {
 async function runShareFilterPackForIOS(): Promise<void> {
   const entries = await getFilterEntries(_deps.descriptionsKey);
   if (entries.length === 0) throw new Error('No phrases to share');
+  const file = await renderFilterCardImage(entries);
+  const shareCode = await encodeFilterPackCode({ phrases: entries.map(e => e.phrase) });
+  await openComposerOnMobile(file, shareCode);
+}
 
-  // Off-screen wrapper carries the theme class so .light-mode/.dark-mode
-  // descendant selectors in content.css resolve correctly. position:fixed +
-  // far-negative left keeps it out of the viewport without display:none,
-  // which html-to-image needs in order to compute layout.
-  //
-  // Deliberately NOT using the .filter-phrases-sidebar/-bottom/-mobile class
-  // here — content.css hides those on body.ff-ios, which would zero out the
-  // screenshot. Side effect: the font-family rule at the top of content.css
-  // is scoped to those same classes, so we inline the same stack here so the
-  // screenshot doesn't fall back to the browser's serif default.
+// Render an off-screen replica of the Bouncer filter card for `entries` and
+// screenshot it to a PNG File — the "Filter out …" card image attached to a
+// shared post.
+//
+// Off-screen wrapper carries the theme class so .light-mode/.dark-mode
+// descendant selectors in content.css resolve correctly. position:fixed +
+// far-negative left keeps it out of the viewport without display:none, which
+// html-to-image needs in order to compute layout. Deliberately NOT using the
+// .filter-phrases-sidebar/-bottom/-mobile class — content.css hides those on
+// body.ff-ios, which would zero out the screenshot; the font-family rule is
+// scoped to those same classes, so we inline the same stack here.
+//
+async function renderFilterCardImage(entries: FilterEntry[]): Promise<File> {
   const theme = _deps.adapter.getThemeMode();
   const wrapper = document.createElement('div');
   wrapper.className = `${theme}-mode`;
@@ -1094,16 +1287,32 @@ async function runShareFilterPackForIOS(): Promise<void> {
   const list = wrapper.querySelector<HTMLElement>('.filter-phrases-list');
   if (list) renderPhrasesInContainer(list, entries);
 
+  // Match the live box: once there are phrases, the animated placeholder is
+  // hidden, leaving "Filter out <phrase> and ▁" — the empty underline input that
+  // signals you can keep adding filters. We don't run the box's event handlers
+  // on this off-screen clone, so hide the placeholder explicitly instead of
+  // letting it freeze on a random cycling word (which would read as a 2nd filter).
+  if (entries.length > 0) {
+    wrapper.querySelector('.filter-placeholder-cycle')?.classList.add('hidden');
+  }
+
   document.body.appendChild(wrapper);
   try {
     const box = wrapper.querySelector<HTMLElement>('.filter-phrases-container');
     if (!box) throw new Error('Off-screen filter container missing');
-    const file = await screenshotFilterBox(box);
-    const shareCode = await encodeFilterPackCode({ phrases: entries.map(e => e.phrase) });
-    await openComposerOnMobile(file, shareCode);
+    return await screenshotFilterBox(box);
   } finally {
     wrapper.remove();
   }
+}
+
+// Open X's in-app compose modal (no navigation / reload) by clicking the page's
+// own compose link, which triggers X's SPA router. Returns the link element, or
+// null if it isn't on the page so callers can throw / fall back.
+function clickComposeLink(): HTMLElement | null {
+  const composeLink = document.querySelector<HTMLElement>('a[href="/compose/post"]');
+  if (composeLink) composeLink.click();
+  return composeLink;
 }
 
 // Mobile X (iPhone WebView UA) renders the composer as a real <textarea>
@@ -1114,9 +1323,7 @@ async function runShareFilterPackForIOS(): Promise<void> {
 // (so React's value tracker sees the change) and attach the screenshot via
 // the composer's hidden file input.
 async function openComposerOnMobile(file: File, shareCode: string): Promise<void> {
-  const composeLink = document.querySelector<HTMLElement>('a[href="/compose/post"]');
-  if (!composeLink) throw new Error('Compose link not found on page');
-  composeLink.click();
+  if (!clickComposeLink()) throw new Error('Compose link not found on page');
 
   const textbox = await waitForElement<HTMLTextAreaElement>('textarea[data-testid="tweetTextarea_0"]', 5000);
   if (!textbox) throw new Error('Compose textarea did not appear');
@@ -1129,6 +1336,56 @@ async function openComposerOnMobile(file: File, shareCode: string): Promise<void
   const captionWithCode = `${SHARE_TWEET_TEXT}\n\n${buildFilterPackShareUrl(shareCode)}`;
   setReactTextareaValue(textbox, captionWithCode);
   textbox.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// Open X's in-app compose modal (no navigation / reload) and prefill it with
+// `caption`. Clicking the page's own `a[href="/compose/post"]` triggers X's SPA
+// router, which pops the composer dialog in place. The desktop composer is a
+// DraftJS contenteditable that ignores direct textContent writes, so we insert
+// via execCommand('insertText') — the only path DraftJS treats as real input;
+// on mobile the same testid is a real <textarea>, filled via its native setter.
+// Returns false if the compose link isn't present so the caller can fall back.
+async function openXComposerModal(caption: string, image?: File): Promise<boolean> {
+  if (!clickComposeLink()) return false;
+
+  // Scope to the modal dialog. The Home feed already has an inline composer with
+  // the SAME data-testid ("tweetTextarea_0"), so an unscoped query would grab
+  // that inline box instead of the popup the click just opened. Fall back to the
+  // unscoped editor only if no dialog shows up (e.g. layouts without the modal).
+  let editor = await waitForElement<HTMLElement>('[role="dialog"] [data-testid="tweetTextarea_0"]', 5000);
+  if (!editor) editor = document.querySelector<HTMLElement>('[data-testid="tweetTextarea_0"]');
+  if (!editor) return false;
+
+  // Let the modal settle a frame so focus/selection land inside the editor
+  // before we type into it.
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+  editor.focus();
+
+  if (editor instanceof HTMLTextAreaElement) {
+    // Mobile: real <textarea>. Native setter so React's value tracker sees it.
+    setReactTextareaValue(editor, caption);
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+
+  // Desktop: DraftJS contenteditable. insertText is the canonical path; if it
+  // doesn't take, fall back to a synthetic paste carrying the same text, which
+  // X's composer also handles (same code path as Cmd-V of a link).
+  document.execCommand('insertText', false, caption);
+  if (!editor.textContent) {
+    const dt = new DataTransfer();
+    dt.setData('text/plain', caption);
+    editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }
+
+  // Attach the "Filter out …" card image by pasting the File into the composer —
+  // X ingests a pasted image File the same as a Cmd-V of an image.
+  if (image) {
+    const dt = new DataTransfer();
+    dt.items.add(image);
+    editor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }
+  return true;
 }
 
 // Update a React-controlled textarea's value via its prototype's native
@@ -1165,11 +1422,10 @@ async function attachImageToMobileComposer(file: File): Promise<void> {
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 }
 
-// Open the X composer and drop the image into it via a synthetic paste event
-// on the composer's contenteditable. X's DraftJS composer runs its paste handler
-// on any ClipboardEvent whose clipboardData carries a File, which is the same
-// code path as a real Cmd-V of an image — so we just drive that path directly
-// instead of fighting with React-controlled <input type="file"> semantics.
+// Caption used by the iOS/mobile share flow (openComposerOnMobile). Kept
+// distinct and recognizable so processImportCodeInPost can spot shared posts —
+// see IMPORT_SENTENCE_SIGNATURE, which matches the substring shared with the
+// desktop caption built in renderShareBack.
 const SHARE_TWEET_TEXT = 'I use Bouncer to remove this from my feed.';
 
 function waitForElement<T extends Element>(selector: string, timeoutMs: number): Promise<T | null> {
@@ -1226,11 +1482,13 @@ export function processImportCodeInPost(article: HTMLElement): void {
   }
 }
 
-// Derive a short signature from SHARE_TWEET_TEXT — the prose the share flow
-// always writes before the link — so a partial view (truncated by X's "Show
-// more") is still recognizable as the share format and worth expanding. First
-// four words are distinctive enough to avoid accidental matches.
-const IMPORT_SENTENCE_SIGNATURE = SHARE_TWEET_TEXT.split(' ').slice(0, 4).join(' ');
+// A stable fragment common to every shared caption — desktop posts "I used
+// Bouncer to remove <filter> from my feed." and the iOS/mobile flow uses
+// SHARE_TWEET_TEXT ("I use Bouncer to remove this…"). Both contain this phrase,
+// so a partial view (truncated by X's "Show more") is still recognizable as the
+// share format and worth expanding to reveal the link. Distinctive enough to
+// avoid accidental matches.
+const IMPORT_SENTENCE_SIGNATURE = 'Bouncer to remove';
 
 function maybeExpandForImportCode(article: HTMLElement, tweetText: HTMLElement): void {
   const visible = tweetText.textContent || '';
@@ -1682,15 +1940,23 @@ function showImportConfirmModal(phrases: string[], code: string): void {
   cancel.addEventListener('click', close);
   apply.addEventListener('click', () => {
     apply.disabled = true;
-    Promise.all(PLATFORM_IDS.map(id => addImportedPhrases(descriptionsStorageKey(id), phrases, code)))
-      .then(counts => {
-        // addImportedPhrases returns how many were actually new per platform;
-        // 0 everywhere means the user already had all of them.
-        const addedAny = counts.some(n => n > 0);
+    // We apply the filter across every platform so it's consistent everywhere,
+    // but the "added / already have" message must reflect the platform the user
+    // is actually looking at. Keying it off "added on ANY platform" made a
+    // re-import of a filter the user already had on the current feed read as
+    // "Filter added" the first time (because it got added to the OTHER
+    // platforms) and only say "you already have it" on the second try.
+    Promise.all(PLATFORM_IDS.map(async (id) => {
+      const key = descriptionsStorageKey(id);
+      return { key, added: await addImportedPhrases(key, phrases, code) };
+    }))
+      .then(results => {
+        const current = results.find(r => r.key === _deps.descriptionsKey);
+        const addedHere = current ? current.added > 0 : results.some(r => r.added > 0);
         const plural = phrases.length > 1;
         syncFilterPhrases();
-        if (addedAny) _deps.reEvaluateAllPosts();
-        title.textContent = addedAny
+        if (addedHere) _deps.reEvaluateAllPosts();
+        title.textContent = addedHere
           ? (plural ? 'Filters added ✓' : 'Filter added ✓')
           : (plural ? 'You already have these filters' : 'You already have this filter');
         chips.remove();
@@ -1702,75 +1968,6 @@ function showImportConfirmModal(phrases: string[], code: string): void {
 
   actions.append(cancel, apply);
   modal.append(brand, title, chips, actions);
-  mount();
-}
-
-/** Share picker: lists every filter the user has and lets them copy a shareable
- *  link for any single one (or post it to X). Opened from the "Share filters"
- *  button — deliberately shares one filter at a time, not the whole list. */
-function openSharePickerModal(entries: FilterEntry[]): void {
-  const { modal, mount } = createShareModal();
-
-  const title = document.createElement('div');
-  title.className = 'ff-share-modal-title';
-  title.textContent = 'Share a filter';
-  modal.appendChild(title);
-
-  if (entries.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'ff-share-empty';
-    empty.textContent = 'You have no filters to share yet.';
-    modal.appendChild(empty);
-  } else {
-    const list = document.createElement('div');
-    list.className = 'ff-share-list';
-    for (const entry of entries) {
-      const row = document.createElement('div');
-      row.className = 'ff-share-row';
-
-      const label = document.createElement('span');
-      label.className = 'ff-share-row-phrase';
-      label.textContent = entry.phrase;
-
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'ff-share-modal-btn ff-share-modal-copy';
-      copyBtn.textContent = 'Copy link';
-      copyBtn.addEventListener('click', () => {
-        buildFiltersShareUrl(entry)
-          // DEMO ONLY — copy the local landing file so the link opens without a
-          // deploy (for screen recording). Delete this .replace before shipping.
-          .then(url => url.replace(
-            'https://bouncer.imbue.com/import',
-            'file:///Users/imbueguest/bouncer/Bouncer/hosting/import.html'))
-          .then(url => navigator.clipboard.writeText(url))
-          .then(() => {
-            copyBtn.textContent = 'Copied!';
-            setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1500);
-          })
-          .catch(err => console.error('[UI] copy share link failed:', err));
-      });
-
-      const postBtn = document.createElement('button');
-      postBtn.className = 'ff-share-modal-btn ff-share-row-post';
-      postBtn.textContent = 'Post to X';
-      postBtn.addEventListener('click', () => {
-        buildFiltersShareUrl(entry)
-          .then(url => {
-            const text = 'Cleaning up my feed with Bouncer — grab this filter:';
-            window.open(
-              `https://x.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
-              '_blank', 'noopener',
-            );
-          })
-          .catch(err => console.error('[UI] post share link failed:', err));
-      });
-
-      row.append(label, copyBtn, postBtn);
-      list.appendChild(row);
-    }
-    modal.appendChild(list);
-  }
-
   mount();
 }
 
@@ -2297,7 +2494,7 @@ function buildYouTubeCard(post: FilteredPost): HTMLElement {
   const title = document.createElement('div');
   title.className = 'yt-card-title';
   if (postContent.textHtml) {
-    title.replaceChildren(DOMPurify.sanitize(postContent.textHtml, { RETURN_DOM_FRAGMENT: true }));
+    title.replaceChildren(parseHTML(postContent.textHtml));
   } else {
     title.textContent = postContent.text || post.evaluationText;
   }
@@ -2563,7 +2760,7 @@ function buildTwitterCard(post: FilteredPost): HTMLElement {
   if (postContent.textHtml) {
     textDiv = document.createElement('div');
     textDiv.className = 'slop-post-text';
-    textDiv.replaceChildren(DOMPurify.sanitize(postContent.textHtml, { RETURN_DOM_FRAGMENT: true }));
+    textDiv.replaceChildren(parseHTML(postContent.textHtml));
     body.appendChild(textDiv);
   } else if (post.evaluationText) {
     textDiv = document.createElement('div');
@@ -2632,7 +2829,7 @@ function buildTwitterCard(post: FilteredPost): HTMLElement {
     if (postContent.quote.textHtml) {
       const quoteText = document.createElement('div');
       quoteText.className = 'slop-quote-text';
-      quoteText.replaceChildren(DOMPurify.sanitize(postContent.quote.textHtml, { RETURN_DOM_FRAGMENT: true }));
+      quoteText.replaceChildren(parseHTML(postContent.quote.textHtml));
       quoteBox.appendChild(quoteText);
     }
 
@@ -3278,11 +3475,46 @@ async function fetchReasoningIfNeeded(article: HTMLElement) {
   }
 }
 
-// ==================== DOM Mutation Handler ====================
-
 // ==================== Why Annoying Button ====================
 
 const DEBUG = false;
+
+// Shared handler for the "This should already be filtered" link, which appears
+// in both the loading-spinner tooltip and the results tooltip: report the false
+// negative, hide the post, and pin the cache so re-evaluation keeps it hidden.
+function reportPostShouldBeFiltered(
+  linkEvent: Event,
+  article: HTMLElement,
+  content: PostContent,
+  tooltip: HTMLElement,
+): void {
+  linkEvent.preventDefault();
+  linkEvent.stopPropagation();
+  const reasoning = _deps.postReasonings.get(article);
+  chrome.runtime.sendMessage({
+    type: 'sendFeedback',
+    siteId: _deps.adapter.siteId,
+    postUrl: content.postUrl || null,
+    tweetData: { text: formatPostForEvaluation(content), imageUrls: content.imageUrls || [] },
+    rawResponse: reasoning?.rawResponse || '',
+    reasoning: reasoning?.reasoning || '',
+    decision: 'false_negative'
+  }).catch(err => console.error('[Bouncer] Missed feedback error:', err));
+  tooltip.remove();
+  storeFilteredPost(article, content, 'User reported: should have been filtered');
+  article.style.transition = 'opacity 0.3s ease';
+  article.style.opacity = '0';
+  setTimeout(() => hidePost(article), 300);
+  chrome.runtime.sendMessage({
+    type: 'overrideCacheEntry',
+    post: formatPostForEvaluation(content),
+    imageUrls: content.imageUrls || [],
+    postUrl: content.postUrl || null,
+    siteId: _deps.adapter.siteId,
+    shouldHide: true,
+    reasoning: 'User reported: should have been filtered'
+  }).catch(err => console.error('[Bouncer] Override cache error:', err));
+}
 
 // Add inline "why annoying" button next to Share post button
 export function addWhyAnnoyingButton(article: HTMLElement) {
@@ -3429,34 +3661,8 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
         chrome.runtime.onMessage.removeListener(progressListener);
       };
 
-      tooltip.querySelector('.ff-missed-link')!.addEventListener('click', (linkEvent) => {
-        linkEvent.preventDefault();
-        linkEvent.stopPropagation();
-        const reasoning = _deps.postReasonings.get(article);
-        chrome.runtime.sendMessage({
-          type: 'sendFeedback',
-          siteId: _deps.adapter.siteId,
-          postUrl: content.postUrl || null,
-          tweetData: { text: formatPostForEvaluation(content), imageUrls: content.imageUrls || [] },
-          rawResponse: reasoning?.rawResponse || '',
-          reasoning: reasoning?.reasoning || '',
-          decision: 'false_negative'
-        }).catch(err => console.error('[Bouncer] Missed feedback error:', err));
-        tooltip.remove();
-        storeFilteredPost(article, content, 'User reported: should have been filtered');
-        article.style.transition = 'opacity 0.3s ease';
-        article.style.opacity = '0';
-        setTimeout(() => hidePost(article), 300);
-        chrome.runtime.sendMessage({
-          type: 'overrideCacheEntry',
-          post: formatPostForEvaluation(content),
-          imageUrls: content.imageUrls || [],
-          postUrl: content.postUrl || null,
-          siteId: _deps.adapter.siteId,
-          shouldHide: true,
-          reasoning: 'User reported: should have been filtered'
-        }).catch(err => console.error('[Bouncer] Override cache error:', err));
-      });
+      tooltip.querySelector('.ff-missed-link')!.addEventListener('click', (linkEvent) =>
+        reportPostShouldBeFiltered(linkEvent, article, content, tooltip));
       try {
         response = await cachedPromise;
       } catch (err) {
@@ -3557,34 +3763,8 @@ export function addWhyAnnoyingButton(article: HTMLElement) {
       missedLink.className = 'ff-missed-link';
       missedLink.textContent = 'This should already be filtered';
       missedLink.href = '#';
-      missedLink.addEventListener('click', (linkEvent) => {
-        linkEvent.preventDefault();
-        linkEvent.stopPropagation();
-        const reasoning = _deps.postReasonings.get(article);
-        chrome.runtime.sendMessage({
-          type: 'sendFeedback',
-          siteId: _deps.adapter.siteId,
-          postUrl: content.postUrl || null,
-          tweetData: { text: formatPostForEvaluation(content), imageUrls: content.imageUrls || [] },
-          rawResponse: reasoning?.rawResponse || '',
-          reasoning: reasoning?.reasoning || '',
-          decision: 'false_negative'
-        }).catch(err => console.error('[Bouncer] Missed feedback error:', err));
-        tooltip.remove();
-        storeFilteredPost(article, content, 'User reported: should have been filtered');
-        article.style.transition = 'opacity 0.3s ease';
-        article.style.opacity = '0';
-        setTimeout(() => hidePost(article), 300);
-        chrome.runtime.sendMessage({
-          type: 'overrideCacheEntry',
-          post: formatPostForEvaluation(content),
-          imageUrls: content.imageUrls || [],
-          postUrl: content.postUrl || null,
-          siteId: _deps.adapter.siteId,
-          shouldHide: true,
-          reasoning: 'User reported: should have been filtered'
-        }).catch(err => console.error('[Bouncer] Override cache error:', err));
-      });
+      missedLink.addEventListener('click', (linkEvent) =>
+        reportPostShouldBeFiltered(linkEvent, article, content, tooltip));
       tooltip.appendChild(missedLink);
 
     // Reposition after content change (height may differ from spinner)

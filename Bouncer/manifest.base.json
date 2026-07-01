@@ -13,9 +13,13 @@
   "host_permissions": [
     "https://bouncer.imbue.com/*"
   ],
+  "_comment_demo_landing": "DEMO ONLY — the file:// match on the landing content script below lets landing.js run on the local hosting/import.html file so the 'Copy link' demo (which rewrites the share URL to that file://) detects the installed extension and redirects to X instead of the Web Store. Requires 'Allow access to file URLs' enabled for the extension at chrome://extensions. Remove that match once bouncer.imbue.com/import is deployed.",
   "content_scripts": [
     {
-      "matches": ["https://bouncer.imbue.com/import*"],
+      "matches": [
+        "https://bouncer.imbue.com/import*",
+        "file:///Users/imbueguest/bouncer/Bouncer/hosting/import.html*"
+      ],
       "js": ["dist/landing.js"],
       "run_at": "document_idle"
     }

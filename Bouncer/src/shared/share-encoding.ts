@@ -201,10 +201,9 @@ function encodeDict(phrases: string[]): Uint8Array {
         // works) since the encoder picks the shorter result.
         const wordBytes = utf8Encoder.encode(words[i]);
         if (wordBytes.length === 0 || wordBytes.length > 255) {
-          // Sentinel that makes encodeDict bail; callers see this as "DICT not
-          // viable" by getting a payload that base64s longer than RAW (i.e.,
-          // we just emit nothing and let RAW win). Easier: throw and let the
-          // top-level encoder catch.
+          // Can't fit this word in a literal's 1-byte length prefix, so DICT
+          // can't represent it. Throw; encodeFilterPackCode catches and falls
+          // back to RAW, which always works.
           throw new Error('dict-method literal too long');
         }
         out.push(TOKEN_LITERAL, wordBytes.length, ...wordBytes);
