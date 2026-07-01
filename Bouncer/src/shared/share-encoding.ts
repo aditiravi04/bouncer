@@ -27,13 +27,15 @@ export const FILTER_PACK_CODE_REGEX = /bncr2_[A-Za-z0-9_-]+/g;
 /** Landing page that hosts the share URL. The bncr2_ code rides in the URL
  *  fragment so it never hits the server — the importing extension extracts it
  *  client-side from the rendered <a>. */
-export const FILTER_PACK_SHARE_URL_BASE = 'imbue.com/product/bouncer';
+export const FILTER_PACK_SHARE_URL_BASE = 'bouncer.imbue.com/import';
 
-/** Match an imbue.com bouncer share URL anywhere in a string. Captures the
- *  bncr2_ code so callers can pass it straight to decodeFilterPackCode. The
- *  scheme is optional because Twitter's link rendering sometimes hides it in
- *  an aria-hidden span and sometimes drops it entirely. */
-export const FILTER_PACK_SHARE_URL_REGEX = /(?:https?:\/\/)?imbue\.com\/product\/bouncer#(bncr2_[A-Za-z0-9_-]+)/;
+/** Match a Bouncer share URL anywhere in a string and capture the bncr2_ code
+ *  so callers can pass it straight to decodeFilterPackCode. Matches the current
+ *  bouncer.imbue.com/import links AND legacy imbue.com/product/bouncer links so
+ *  codes already shared on X keep importing. The scheme is optional because
+ *  Twitter's link rendering sometimes hides it in an aria-hidden span and
+ *  sometimes drops it entirely. */
+export const FILTER_PACK_SHARE_URL_REGEX = /(?:https?:\/\/)?(?:bouncer\.imbue\.com\/import|imbue\.com\/product\/bouncer)#(bncr2_[A-Za-z0-9_-]+)/;
 
 /** Build the share URL that gets pasted into the tweet caption. */
 export function buildFilterPackShareUrl(code: string): string {

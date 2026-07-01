@@ -372,10 +372,24 @@ export interface IOSDeps {
   getFilteredPosts: () => FilteredPost[];
 }
 
+// ==================== Filter Entries ====================
+
+/** One user-defined filter phrase with stable identity. The id (a
+ *  `crypto.randomUUID()` string assigned in the storage layer) is what makes an
+ *  entry individually deletable, shareable, and import-trackable. */
+export interface FilterEntry {
+  id: string;
+  phrase: string;
+  createdAt: number;
+  /** When imported from a share code, the originating bncr2_ code; absent for
+   *  hand-typed entries. */
+  sharedFrom?: string;
+}
+
 // ==================== Chrome Storage Schema ====================
 
 /** Per-site description keys, derived from SiteId. */
-type DescriptionKeys = { [K in SiteId as `descriptions_${K}`]: string[] };
+type DescriptionKeys = { [K in SiteId as `descriptions_${K}`]: FilterEntry[] };
 
 /** Per-platform master-switch keys, derived from SiteId. Adding a new
  *  platform automatically extends this map. */
@@ -395,6 +409,13 @@ export type StorageSchema = SettingsBase & {
   googleAuthToken: string;
   openrouterCodeVerifier: string;
   lastSeenVersion: string;
+  /** A shared filter code (bncr2_…) handed off by the silent landing page for
+   *  the x.com content script to pick up and prompt "Apply this filter?".
+   *  Set on redirect, cleared once the prompt is shown. */
+  pendingImport: string;
+  /** Unix ms when pendingImport was set (≈ link-click / post-install time).
+   *  Used to expire a stale handoff after PENDING_IMPORT_TTL_MS. */
+  pendingImportAt: number;
 } & DescriptionKeys & PlatformEnabledKeys;
 
 // ==================== API Response Types ====================

@@ -206,6 +206,20 @@ async function build() {
     define,
   });
 
+  // 4b. Landing-page content script (injected on bouncer.imbue.com/import to
+  // offer importing a shared filter when Bouncer is already installed).
+  const landingCtx = await esbuild.context({
+    entryPoints: [path.join(__dirname, 'src/content/landing.ts')],
+    outfile: path.join(__dirname, 'dist/landing.js'),
+    bundle: true,
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2020',
+    minify: false,
+    sourcemap: false,
+    define,
+  });
+
   // 5. iOS app builds (IIFE, LiteRT-LM stubbed). Injected into a WKWebView
   // that has no WebGPU — iOS uses a native CoreML bridge instead, so stubbing
   // keeps these bundles small.
@@ -232,7 +246,7 @@ async function build() {
     )
   );
 
-  const contexts = [bgCtx, offscreenCtx, otherCtx, signinBridgeCtx, ...stubbedIifeCtxs];
+  const contexts = [bgCtx, offscreenCtx, otherCtx, signinBridgeCtx, landingCtx, ...stubbedIifeCtxs];
 
   // Type-strip each platform adapter (unbundled, standalone content script).
   // Each adapter ships as its own dist/<Name>.js and is loaded by the manifest

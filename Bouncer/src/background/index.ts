@@ -739,7 +739,16 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // Check local model statuses on extension install/update
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === 'install') {
-    chrome.tabs.create({ url: 'https://x.com' }).catch(err => console.error('[Background] Failed to open x.com on install:', err));
+    // Route first-run through the share landing page: if the user arrived from a
+    // shared filter link (code stashed in localStorage before the Web Store
+    // redirect), the landing content script picks it up and shows the "Apply this
+    // filter?" prompt. With nothing pending it forwards to x.com, so normal
+    // installs still land on the app.
+    // DEMO ONLY — open the local landing file after install so the post-install
+    // apply flow can be recorded without a deploy. Restore the
+    // https://bouncer.imbue.com/import?installed=1 URL before shipping.
+    chrome.tabs.create({ url: 'file:///Users/imbueguest/bouncer/Bouncer/hosting/import.html?installed=1' })
+      .catch(err => console.error('[Background] Failed to open landing page on install:', err));
   }
 
   if (details.reason === 'install' || details.reason === 'update') {

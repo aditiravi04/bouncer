@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Add a filter to Bouncer</title>
+
+  <!-- Favicon = the little icon shown next to the title in link unfurls
+       (Discord/iMessage/Slack) and browser tabs. icon128.png ships in this
+       hosting folder, so it's served at /icon128.png once deployed. -->
+  <link rel="icon" type="image/png" href="/icon128.png">
+  <link rel="apple-touch-icon" href="/icon128.png">
+
+  <!-- Social preview (the Slack/Discord/iMessage/X "unfurl" card). Image reused
+       from imbue.com/product/bouncer so shared links look on-brand. Note: the
+       #bncr2_ code in the URL is never seen by crawlers, so every shared link
+       shows this same generic card. -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://bouncer.imbue.com/import">
+  <meta property="og:title" content="Import this Bouncer filter">
+  <meta property="og:description" content="Open the link to add this filter to your feed — Bouncer filters out the noise on X.">
+  <meta property="og:image" content="https://cdn.sanity.io/images/dg1xe82e/production/7773f5a7135c6609f8cd1cb4e212bba1e9152ed1-1200x630.png?w=1200&amp;h=630">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Import this Bouncer filter">
+  <meta name="twitter:description" content="Open the link to add this filter to your feed — Bouncer filters out the noise on X.">
+  <meta name="twitter:image" content="https://cdn.sanity.io/images/dg1xe82e/production/7773f5a7135c6609f8cd1cb4e212bba1e9152ed1-1200x630.png?w=1200&amp;h=630">
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #faf6f0;
+      color: #8b7355;
+    }
+    .wrap { text-align: center; }
+    .spinner {
+      width: 26px; height: 26px; margin: 0 auto 14px;
+      border: 3px solid #e6ddd0; border-top-color: #2c1810; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #msg { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="spinner"></div>
+    <p id="msg">One moment…</p>
+  </div>
+
+  <script>
+    // This page is intentionally a near-invisible router — it just decides where
+    // to send you and redirects, so there's no landing "page" to click through.
+    //
+    //  - Bouncer installed → its content script (dist/landing.js) runs here,
+    //    hands the shared code to the extension, and redirects to x.com BEFORE
+    //    the timer below fires. The "Apply this filter?" prompt shows on X.
+    //  - Not installed → the timer fires → send the user to the right store,
+    //    stashing the code so it applies after install.
+
+    var CHROME_WEB_STORE_URL =
+      'https://chromewebstore.google.com/detail/bouncer-filter-your-x-fee/bkijmhafoocfloemhancbgadknkgdkcm';
+    var FIREFOX_ADDON_URL = 'https://addons.mozilla.org/en-US/firefox/addon/bouncer-heal-your-feed/';
+    var SAFARI_APP_STORE_URL = 'https://apps.apple.com/us/app/bouncer-heal-your-feed/id6762687153?mt=12';
+    var PENDING_KEY = 'bouncerPendingImport';
+    var REDIRECT_DELAY_MS = 1200;
+
+    // The shared filter code lives in the URL fragment (never sent to a server).
+    var code = location.hash.replace(/^#/, '');
+
+    // Returns 'chrome' | 'firefox' | 'safari' | 'other'.
+    function pickBrowser() {
+      var ua = navigator.userAgent;
+      if (/Android/.test(ua)) return 'other';
+      if (/\bFirefox\//.test(ua) && !/Seamonkey\//.test(ua)) return 'firefox';
+      if (/^((?!chrome|chromium|android|crios|fxios|edg).)*safari/i.test(ua)) return 'safari';
+      var brands = navigator.userAgentData && navigator.userAgentData.brands;
+      var isChromium = (brands && brands.some(function (b) {
+        return /Chromium|Google Chrome/.test(b.brand);
+      })) || /\bChrome\//.test(ua);
+      return isChromium ? 'chrome' : 'other';
+    }
+
+    function storeFor(browser) {
+      return {
+        chrome:  CHROME_WEB_STORE_URL,
+        firefox: FIREFOX_ADDON_URL,
+        safari:  SAFARI_APP_STORE_URL
+      }[browser] || null;
+    }
+
+    // If Bouncer's content script hasn't redirected us by now, it isn't
+    // installed → route to the store (stashing the code first).
+    setTimeout(function () {
+      if (code) {
+        try { localStorage.setItem(PENDING_KEY, code); } catch (e) {}
+      }
+      var storeUrl = storeFor(pickBrowser());
+      if (storeUrl) {
+        window.location.href = storeUrl;
+      } else {
+        document.querySelector('.spinner').style.display = 'none';
+        document.getElementById('msg').textContent =
+          'Open this link on desktop Chrome, Firefox, or Safari to add the filter.';
+      }
+    }, REDIRECT_DELAY_MS);
+  </script>
+</body>
+</html>

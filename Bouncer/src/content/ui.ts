@@ -8,8 +8,10 @@ import {
   encodeFilterPackCode, decodeFilterPackCode, buildFilterPackShareUrl,
   FILTER_PACK_SHARE_URL_REGEX,
 } from '../shared/share-encoding';
-import type { BackgroundToContentMessage, ContentUIDeps, FilteredPost, PostContent, LocalModelStatus } from '../types';
-import { getStorage, setStorage, getDescriptions, setDescriptions } from '../shared/storage';
+import type { BackgroundToContentMessage, ContentUIDeps, FilteredPost, PostContent, LocalModelStatus, FilterEntry } from '../types';
+import { getStorage, setStorage, getDescriptions, setDescriptions, getFilterEntries, deleteFilterEntryById, getPendingImport, clearPendingImport, addImportedPhrases } from '../shared/storage';
+import { buildFiltersShareUrl } from '../shared/filter-sharing';
+import { PLATFORM_IDS, descriptionsStorageKey } from '../shared/platforms';
 import { getReleaseNote } from './release-notes';
 import { runIOSImportAnimation } from './ios';
 
@@ -43,6 +45,8 @@ export function initUI(deps: ContentUIDeps) {
       if (isAuthenticated) {
         console.log('[Bouncer] Calling refreshAllFilterBoxes after auth');
         refreshAllFilterBoxes();
+        // Now that they're signed in, show any pending "Apply this filter?" prompt.
+        checkPendingImport().catch(err => console.error('[Bouncer] pending import (post-auth) failed:', err));
       } else {
         console.log('[Bouncer] authenticated=false, skipping refresh');
       }
@@ -668,9 +672,9 @@ function setupFilterBoxEventHandlers(container: HTMLElement) {
   }
 
   // Load and render saved descriptions
-  getDescriptions(_deps.descriptionsKey).then((descriptions) => {
-    if (descriptions.length > 0) {
-      renderPhrasesInContainer(phrasesListContainer, descriptions);
+  getFilterEntries(_deps.descriptionsKey).then((entries) => {
+    if (entries.length > 0) {
+      renderPhrasesInContainer(phrasesListContainer, entries);
     }
   }).catch(err => console.error('[UI] Failed to load descriptions:', err));
 
@@ -983,14 +987,14 @@ export function injectBannerFilterBox() {
 // ==================== Filter Phrases ====================
 
 export function syncFilterPhrases() {
-  getDescriptions(_deps.descriptionsKey).then((descriptions) => {
+  getFilterEntries(_deps.descriptionsKey).then((entries) => {
 
     // Update desktop/tablet/mobile containers
     [filterPhrasesContainer, bottomFilterContainer, mobileFilterContainer].forEach(container => {
       if (container && container.isConnected) {
         const phrasesListContainer = container.querySelector('.filter-phrases-list');
         if (phrasesListContainer) {
-          renderPhrasesInContainer(phrasesListContainer, descriptions);
+          renderPhrasesInContainer(phrasesListContainer, entries);
         }
       }
     });
@@ -1009,18 +1013,13 @@ export function syncFilterPhrases() {
 
 let sharingFilterPackInProgress = false;
 
-async function shareFilterPack(container: HTMLElement): Promise<void> {
+async function shareFilterPack(_container: HTMLElement): Promise<void> {
   if (sharingFilterPackInProgress) return;
   sharingFilterPackInProgress = true;
 
-  const box = container.querySelector<HTMLElement>('.filter-phrases-container');
-  if (!box) { sharingFilterPackInProgress = false; return; }
-
   try {
-    const file = await screenshotFilterBox(box);
-    const sharedPhrases = await getDescriptions(_deps.descriptionsKey);
-    const shareCode = await encodeFilterPackCode({ phrases: sharedPhrases });
-    await openComposerWithImage(file, shareCode);
+    const entries = await getFilterEntries(_deps.descriptionsKey);
+    openSharePickerModal(entries);
   } catch (err) {
     console.error('[Bouncer] shareFilterPack error:', err);
   } finally {
@@ -1060,8 +1059,8 @@ export async function shareFilterPackForIOS(): Promise<void> {
 }
 
 async function runShareFilterPackForIOS(): Promise<void> {
-  const phrases = await getDescriptions(_deps.descriptionsKey);
-  if (phrases.length === 0) throw new Error('No phrases to share');
+  const entries = await getFilterEntries(_deps.descriptionsKey);
+  if (entries.length === 0) throw new Error('No phrases to share');
 
   // Off-screen wrapper carries the theme class so .light-mode/.dark-mode
   // descendant selectors in content.css resolve correctly. position:fixed +
@@ -1093,14 +1092,14 @@ async function runShareFilterPackForIOS(): Promise<void> {
   wrapper.querySelectorAll('.filter-ai-text-toggle').forEach(el => el.remove());
 
   const list = wrapper.querySelector<HTMLElement>('.filter-phrases-list');
-  if (list) renderPhrasesInContainer(list, phrases);
+  if (list) renderPhrasesInContainer(list, entries);
 
   document.body.appendChild(wrapper);
   try {
     const box = wrapper.querySelector<HTMLElement>('.filter-phrases-container');
     if (!box) throw new Error('Off-screen filter container missing');
     const file = await screenshotFilterBox(box);
-    const shareCode = await encodeFilterPackCode({ phrases });
+    const shareCode = await encodeFilterPackCode({ phrases: entries.map(e => e.phrase) });
     await openComposerOnMobile(file, shareCode);
   } finally {
     wrapper.remove();
@@ -1172,48 +1171,6 @@ async function attachImageToMobileComposer(file: File): Promise<void> {
 // code path as a real Cmd-V of an image — so we just drive that path directly
 // instead of fighting with React-controlled <input type="file"> semantics.
 const SHARE_TWEET_TEXT = 'I use Bouncer to remove this from my feed.';
-
-async function openComposerWithImage(file: File, shareCode: string): Promise<void> {
-  // Click the sidebar Post link the same way a user would — this triggers X's
-  // React Router to open the composer as a modal overlay.
-  const composeLink = document.querySelector<HTMLElement>('a[href="/compose/post"]');
-  if (!composeLink) throw new Error('Compose link not found on page');
-  composeLink.click();
-
-  // Scope to the modal dialog — on /home there's also an inline "What's
-  // happening?" composer with the same tweetTextarea_0 testid earlier in the
-  // DOM, which would otherwise win the querySelector race and steal the paste.
-  const textbox = await waitForElement<HTMLElement>('[role="dialog"] [data-testid="tweetTextarea_0"]', 5000);
-  if (!textbox) throw new Error('Compose textbox did not appear');
-
-  textbox.focus();
-
-  // Paste image first, then text — DraftJS' paste handler is more reliable
-  // with one data type at a time than with a combined file + text/plain
-  // payload, which some builds only read one of.
-  const imageDt = new DataTransfer();
-  imageDt.items.add(file);
-  textbox.dispatchEvent(new ClipboardEvent('paste', {
-    clipboardData: imageDt,
-    bubbles: true,
-    cancelable: true,
-  }));
-
-  // Let DraftJS finish ingesting the image before the text paste — mixing the
-  // two synchronously can make the text land inside the media-attach flow.
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-
-  textbox.focus();
-  const shareUrl = buildFilterPackShareUrl(shareCode);
-  const captionWithCode = `${SHARE_TWEET_TEXT}\n\n${shareUrl}`;
-  const textDt = new DataTransfer();
-  textDt.setData('text/plain', captionWithCode);
-  textbox.dispatchEvent(new ClipboardEvent('paste', {
-    clipboardData: textDt,
-    bubbles: true,
-    cancelable: true,
-  }));
-}
 
 function waitForElement<T extends Element>(selector: string, timeoutMs: number): Promise<T | null> {
   return new Promise((resolve) => {
@@ -1551,15 +1508,16 @@ async function confirmAndImportPack(phrases: string[]): Promise<void> {
   _deps.reEvaluateAllPosts();
 }
 
-function renderPhrasesInContainer(container: Element, descriptions: string[]) {
+function renderPhrasesInContainer(container: Element, entries: FilterEntry[]) {
   container.replaceChildren();
-  const len = descriptions.length;
-  descriptions.forEach((desc, index) => {
+  const len = entries.length;
+  entries.forEach((entry, index) => {
     const phrase = document.createElement('span');
     phrase.className = 'filter-phrase-inline';
-    phrase.textContent = desc;
+    phrase.textContent = entry.phrase;
     phrase.title = 'Click to remove';
-    phrase.addEventListener('click', asyncHandler(() => removeFilterPhrase(desc)));
+    phrase.dataset.filterId = entry.id;
+    phrase.addEventListener('click', asyncHandler(() => removeFilterEntryById(entry.id)));
     container.appendChild(phrase);
 
     if (index < len - 1) {
@@ -1624,6 +1582,196 @@ export async function removeFilterPhrase(phrase: string) {
   await setDescriptions(_deps.descriptionsKey, descriptions.filter((d: string) => d !== phrase));
   clearFilteredPosts();
   syncFilterPhrases();
+}
+
+/** Delete a single filter by its stable id (handles duplicate phrases correctly,
+ *  unlike removeFilterPhrase which matches by text). */
+export async function removeFilterEntryById(id: string) {
+  await deleteFilterEntryById(_deps.descriptionsKey, id);
+  clearFilteredPosts();
+  syncFilterPhrases();
+}
+
+/** On page load, check whether the silent landing page handed us a shared filter
+ *  code to import. If so, show the "Apply this filter?" prompt right here on X. */
+export async function checkPendingImport(): Promise<void> {
+  const code = await getPendingImport();
+  if (!code) return;
+  // Hold off until the user has signed in / activated Bouncer. The code stays in
+  // storage; this is re-run right after auth completes (authStateChanged
+  // listener) and after checkAuthStatus on load, so a freshly-installed user
+  // logs in first, THEN gets the "Apply this filter?" prompt.
+  if (!isAuthenticated) return;
+  await clearPendingImport(); // one-shot — never re-prompt for the same handoff
+  const pack = await decodeFilterPackCode(code);
+  if (!pack || pack.phrases.length === 0) return;
+  showImportConfirmModal(pack.phrases, code);
+}
+
+/** Shared scaffolding for the Bouncer modals (share picker + import prompt): a
+ *  full-screen overlay + a themed card, with Escape / click-outside to close and
+ *  a fade-in on mount. Removes any existing modal first. Fill `modal`, then call
+ *  `mount()`. */
+function createShareModal(extraModalClass = ''): {
+  overlay: HTMLElement; modal: HTMLElement; close: () => void; mount: () => void;
+} {
+  document.querySelector('.ff-share-modal-overlay')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'ff-share-modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'ff-share-modal ' + (extraModalClass ? extraModalClass + ' ' : '')
+    + _deps.adapter.getThemeMode() + '-mode';
+
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+  function close() {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', onKey);
+
+  const mount = () => {
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('visible'));
+  };
+
+  return { overlay, modal, close, mount };
+}
+
+/** "Apply this filter?" confirmation, shown on X for an incoming shared filter.
+ *  Applies to every platform (deduped, tagged with the originating code). */
+function showImportConfirmModal(phrases: string[], code: string): void {
+  const { modal, close, mount } = createShareModal('ff-import-modal');
+
+  // Bouncer branding so it's clearly *our* prompt, not something from X.
+  const brand = document.createElement('div');
+  brand.className = 'ff-import-brand';
+  const logo = document.createElement('img');
+  logo.className = 'ff-import-brand-logo';
+  logo.src = chrome.runtime.getURL('icons/icon48.png');
+  logo.alt = 'Bouncer';
+  const brandName = document.createElement('span');
+  brandName.className = 'ff-import-brand-name';
+  brandName.textContent = 'Bouncer';
+  brand.append(logo, brandName);
+
+  const title = document.createElement('div');
+  title.className = 'ff-share-modal-title';
+  title.textContent = phrases.length > 1 ? 'Apply these filters?' : 'Apply this filter?';
+
+  const chips = document.createElement('div');
+  chips.className = 'ff-import-chips';
+  for (const phrase of phrases) {
+    const chip = document.createElement('span');
+    chip.className = 'ff-import-chip';
+    chip.textContent = phrase;
+    chips.appendChild(chip);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'ff-import-actions';
+  const cancel = document.createElement('button');
+  cancel.className = 'ff-share-modal-btn ff-import-cancel';
+  cancel.textContent = 'Not now';
+  const apply = document.createElement('button');
+  apply.className = 'ff-share-modal-btn ff-share-modal-copy';
+  apply.textContent = 'Apply';
+
+  cancel.addEventListener('click', close);
+  apply.addEventListener('click', () => {
+    apply.disabled = true;
+    Promise.all(PLATFORM_IDS.map(id => addImportedPhrases(descriptionsStorageKey(id), phrases, code)))
+      .then(counts => {
+        // addImportedPhrases returns how many were actually new per platform;
+        // 0 everywhere means the user already had all of them.
+        const addedAny = counts.some(n => n > 0);
+        const plural = phrases.length > 1;
+        syncFilterPhrases();
+        if (addedAny) _deps.reEvaluateAllPosts();
+        title.textContent = addedAny
+          ? (plural ? 'Filters added ✓' : 'Filter added ✓')
+          : (plural ? 'You already have these filters' : 'You already have this filter');
+        chips.remove();
+        actions.remove();
+        setTimeout(close, 1500);
+      })
+      .catch(err => { console.error('[UI] import apply failed:', err); close(); });
+  });
+
+  actions.append(cancel, apply);
+  modal.append(brand, title, chips, actions);
+  mount();
+}
+
+/** Share picker: lists every filter the user has and lets them copy a shareable
+ *  link for any single one (or post it to X). Opened from the "Share filters"
+ *  button — deliberately shares one filter at a time, not the whole list. */
+function openSharePickerModal(entries: FilterEntry[]): void {
+  const { modal, mount } = createShareModal();
+
+  const title = document.createElement('div');
+  title.className = 'ff-share-modal-title';
+  title.textContent = 'Share a filter';
+  modal.appendChild(title);
+
+  if (entries.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'ff-share-empty';
+    empty.textContent = 'You have no filters to share yet.';
+    modal.appendChild(empty);
+  } else {
+    const list = document.createElement('div');
+    list.className = 'ff-share-list';
+    for (const entry of entries) {
+      const row = document.createElement('div');
+      row.className = 'ff-share-row';
+
+      const label = document.createElement('span');
+      label.className = 'ff-share-row-phrase';
+      label.textContent = entry.phrase;
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'ff-share-modal-btn ff-share-modal-copy';
+      copyBtn.textContent = 'Copy link';
+      copyBtn.addEventListener('click', () => {
+        buildFiltersShareUrl(entry)
+          // DEMO ONLY — copy the local landing file so the link opens without a
+          // deploy (for screen recording). Delete this .replace before shipping.
+          .then(url => url.replace(
+            'https://bouncer.imbue.com/import',
+            'file:///Users/imbueguest/bouncer/Bouncer/hosting/import.html'))
+          .then(url => navigator.clipboard.writeText(url))
+          .then(() => {
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1500);
+          })
+          .catch(err => console.error('[UI] copy share link failed:', err));
+      });
+
+      const postBtn = document.createElement('button');
+      postBtn.className = 'ff-share-modal-btn ff-share-row-post';
+      postBtn.textContent = 'Post to X';
+      postBtn.addEventListener('click', () => {
+        buildFiltersShareUrl(entry)
+          .then(url => {
+            const text = 'Cleaning up my feed with Bouncer — grab this filter:';
+            window.open(
+              `https://x.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
+              '_blank', 'noopener',
+            );
+          })
+          .catch(err => console.error('[UI] post share link failed:', err));
+      });
+
+      row.append(label, copyBtn, postBtn);
+      list.appendChild(row);
+    }
+    modal.appendChild(list);
+  }
+
+  mount();
 }
 
 // ==================== Settings Modal ====================

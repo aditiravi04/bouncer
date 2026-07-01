@@ -14,7 +14,7 @@ import {
 } from './ios';
 
 import {
-  initUI, checkAuthStatus,
+  initUI, checkAuthStatus, checkPendingImport,
   getFilteredPosts, getFilteredTabActive,
   updateTheme,
   injectFilterPhrasesInput, injectBottomFilterBox, injectMobileFilterBox,
@@ -618,6 +618,11 @@ import { formatPostForEvaluation } from '../shared/utils';
 
     await checkLocalModelActive();
     await checkAuthStatus();
+
+    // Auth state is known now — prompt for any pending shared-filter import.
+    // (Covers already-signed-in users; freshly-signed-in users are handled by
+    // the authStateChanged listener in ui.ts.)
+    checkPendingImport().catch(err => console.error('[Bouncer] pending import check failed:', err));
 
     if (enabled) {
       observePosts();

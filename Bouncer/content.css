@@ -3059,3 +3059,143 @@ body.ff-ios .ff-ios-page.dark-mode .ff-ios-page-header {
   color: rgba(255, 255, 255, 0.55);
 }
 
+/* ==================== Share picker modal ==================== */
+.ff-share-modal-overlay {
+  display: flex;
+  position: fixed;
+  inset: 0;
+  background-color: rgba(91, 112, 131, 0.4);
+  z-index: 10002;
+  justify-content: center;
+  align-items: center;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+}
+.ff-share-modal-overlay.visible { opacity: 1; visibility: visible; }
+.ff-share-modal {
+  width: 460px;
+  max-width: 90vw;
+  background-color: rgb(0, 0, 0);
+  color: rgb(231, 233, 234);
+  border-radius: 16px;
+  padding: 24px;
+  box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  transform: scale(0.95);
+  transition: transform 0.2s ease;
+}
+.ff-share-modal-overlay.visible .ff-share-modal { transform: scale(1); }
+.ff-share-modal-title { font-size: 18px; font-weight: 800; margin-bottom: 16px; }
+.ff-share-empty { font-size: 14px; color: rgb(113, 118, 123); }
+.ff-share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.ff-share-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background-color: rgb(22, 24, 28);
+}
+.ff-share-row-phrase {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: rgb(231, 233, 234);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ff-share-modal-btn {
+  appearance: none;
+  border: none;
+  border-radius: 9999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ff-share-modal-copy { background-color: rgb(29, 155, 240); color: #fff; }
+.ff-share-modal-copy:hover { background-color: rgb(26, 140, 216); }
+.ff-share-row-post {
+  background-color: transparent;
+  color: rgb(231, 233, 234);
+  border: 1px solid rgb(83, 100, 113);
+}
+.ff-share-row-post:hover { background-color: rgba(239, 243, 244, 0.1); }
+.ff-share-modal.light-mode {
+  background-color: #fff;
+  color: rgb(15, 20, 25);
+}
+.ff-share-modal.light-mode .ff-share-row { background-color: rgb(247, 249, 249); }
+.ff-share-modal.light-mode .ff-share-row-phrase { color: rgb(15, 20, 25); }
+.ff-share-modal.light-mode .ff-share-row-post {
+  color: rgb(15, 20, 25);
+  border-color: rgb(207, 217, 222);
+}
+.ff-share-modal.light-mode .ff-share-row-post:hover { background-color: rgba(15, 20, 25, 0.1); }
+.ff-share-modal.light-mode .ff-share-empty { color: rgb(83, 100, 113); }
+
+/* ==================== Import confirm modal ("Apply this filter?") ==================== */
+.ff-import-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+.ff-import-chip {
+  background-color: rgb(22, 24, 28);
+  color: rgb(231, 233, 234);
+  font-weight: 600;
+  font-size: 14px;
+  padding: 6px 12px;
+  border-radius: 9999px;
+}
+.ff-import-actions {
+  display: flex;
+  gap: 10px;
+}
+.ff-import-actions .ff-share-modal-btn { flex: 1; }
+.ff-import-cancel {
+  background-color: transparent;
+  color: rgb(231, 233, 234);
+  border: 1px solid rgb(83, 100, 113);
+}
+.ff-import-cancel:hover { background-color: rgba(239, 243, 244, 0.1); }
+.ff-share-modal.light-mode .ff-import-chip { background-color: rgb(247, 249, 249); color: rgb(15, 20, 25); }
+.ff-share-modal.light-mode .ff-import-cancel { color: rgb(15, 20, 25); border-color: rgb(207, 217, 222); }
+.ff-share-modal.light-mode .ff-import-cancel:hover { background-color: rgba(15, 20, 25, 0.1); }
+
+/* Bouncer branding on the import modal — warm-orange accent from the logo so it
+   reads as "from Bouncer", not X. */
+.ff-import-modal {
+  border: 2px solid #e8672e;
+  box-shadow: 0 0 0 1px rgba(232, 103, 46, 0.25), 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+.ff-import-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.ff-import-brand-logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+.ff-import-brand-name {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: #e8672e;
+}
+
